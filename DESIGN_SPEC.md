@@ -98,6 +98,44 @@ Routing is Python-side in `app/router.py`.
 
 The workflow records a `RouteRecord` for each stage. Low-risk extraction, classification, and retrieval summarization use the cheap route. Failed verification or revision loops escalate drafting to the strong route. Verification always records the verifier route.
 
+## Region-Aware Routing Telemetry
+
+The current router selects a model class. The next routing dimension is Google
+Cloud region. This should be implemented as a model-plus-region decision, not as
+a claim that the agent can select an individual physical data center.
+
+The design skeleton is in `docs/design/gcp_compute_electricity_spread.md` with
+supporting examples:
+
+- `config/region_power_map.example.yaml`
+- `sql/gcp_compute_billing_hourly.example.sql`
+- `sql/compute_electricity_spread_view.example.sql`
+
+The telemetry layer joins:
+
+- Cloud Asset Inventory resource-change events
+- Cloud Monitoring CPU/reservation/accelerator metrics
+- Cloud Billing BigQuery export costs and usage
+- Cloud Billing Pricing API or pricing export data
+- regional wholesale electricity price proxies
+- Google regional CFE/carbon context
+
+The output is a compute-electricity spread proxy by region and hour. It is a
+routing/scoring signal only. Google Cloud does not expose actual data-center
+electricity prices or exact workload-level kWh, so the view must carry
+confidence scores and coefficient assumptions.
+
+Future route records can add:
+
+- selected Google region
+- regional spread proxy
+- power proxy source
+- mapping confidence
+- latency/compliance constraints
+
+This signal must not bypass verification, policy checks, deployment controls, or
+any external settlement/execution rail.
+
 ## Verification
 
 `app/verifiers.py` checks:

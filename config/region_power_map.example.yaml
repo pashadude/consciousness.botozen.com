@@ -1,0 +1,83 @@
+version: 1
+description: >
+  Example Google Cloud region to power-market proxy map. These mappings estimate
+  regional wholesale electricity exposure and are not Google data-center power
+  prices.
+
+defaults:
+  pue: 1.10
+  watts_per_vcpu: 8.0
+  watts_per_gpu: 300.0
+  watts_per_tpu: 300.0
+  confidence: low
+
+regions:
+  us-south1:
+    google_location: "Dallas, Texas, United States"
+    power_proxy: "ERCOT North Hub or local load-zone proxy"
+    source: "GridStatus, ERCOT, EIA"
+    confidence: medium
+    notes: "Good regional match, but not a Google facility-level tariff."
+
+  us-east4:
+    google_location: "Northern Virginia, United States"
+    power_proxy: "PJM Dominion regional proxy"
+    source: "GridStatus, PJM, EIA"
+    confidence: medium
+    notes: "Use PJM Dominion or a nearby hub depending on data availability."
+
+  us-central1:
+    google_location: "Iowa, United States"
+    power_proxy: "MISO/SPP regional proxy, calibrated by zone availability"
+    source: "GridStatus, MISO, SPP, EIA"
+    confidence: low
+    notes: "Iowa grid proxy selection needs validation before routing use."
+
+  us-east1:
+    google_location: "South Carolina, United States"
+    power_proxy: "Southeast bilateral or EIA regional proxy"
+    source: "EIA"
+    confidence: low
+    notes: "Less transparent wholesale node mapping than ISO/RTO regions."
+
+  us-west1:
+    google_location: "Oregon, United States"
+    power_proxy: "BPA / Mid-Columbia proxy"
+    source: "EIA, BPA, commercial feeds"
+    confidence: low
+    notes: "Useful for context, but market proxy may be coarse."
+
+  us-west2:
+    google_location: "Los Angeles, California, United States"
+    power_proxy: "CAISO SP15 proxy"
+    source: "GridStatus, CAISO, EIA"
+    confidence: medium
+    notes: "Strong ISO data availability; still not data-center-specific."
+
+  europe-west3:
+    google_location: "Frankfurt, Germany"
+    power_proxy: "Germany/Luxembourg day-ahead power"
+    source: "ENTSO-E, EPEX, commercial feed"
+    confidence: medium
+    notes: "Country-level day-ahead proxy for Frankfurt region."
+
+  europe-west4:
+    google_location: "Netherlands"
+    power_proxy: "Netherlands day-ahead power"
+    source: "ENTSO-E, EPEX, commercial feed"
+    confidence: medium
+    notes: "Country-level proxy; validate EUR/MWh to USD/MWh conversion."
+
+  europe-north1:
+    google_location: "Finland"
+    power_proxy: "Nord Pool Finland"
+    source: "Nord Pool, ENTSO-E"
+    confidence: medium
+    notes: "Good country market proxy with strong clean-energy context."
+
+  europe-west2:
+    google_location: "London, England"
+    power_proxy: "Great Britain day-ahead power"
+    source: "Elexon, Nord Pool, EPEX, commercial feed"
+    confidence: medium
+    notes: "Country-level proxy; watch GBP/MWh to USD/MWh conversion."

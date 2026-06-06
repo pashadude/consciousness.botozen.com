@@ -16,6 +16,7 @@ The agent:
 - Retrieves evidence through artifact references and optional MCP research tools.
 - Optionally ranks uploaded text, image, audio, video, and PDF artifacts with Gemini multimodal embeddings.
 - Records Python-side model routing decisions for cheap, strong, and verifier routes.
+- Documents a future region-aware telemetry layer for routing across both models and Google Cloud regions.
 - Verifies final output for spec gaps, unsupported claims, trajectory coverage, and safety issues.
 - Runs locally with `adk web`.
 - Includes Agent Runtime deployment support and optional Cloud Run deployment.
@@ -56,6 +57,13 @@ flowchart LR
 │   └── verifiers.py          # Quality, hallucination, trajectory, and safety checks
 ├── deploy/
 │   └── deploy_runtime.py     # Agent Runtime and optional Cloud Run deployment
+├── config/
+│   └── region_power_map.example.yaml
+├── sql/
+│   ├── gcp_compute_billing_hourly.example.sql
+│   └── compute_electricity_spread_view.example.sql
+├── docs/
+│   └── design/gcp_compute_electricity_spread.md
 ├── tests/
 │   ├── test_acceptance.py    # Deterministic acceptance tests
 │   └── eval/
@@ -269,6 +277,29 @@ Routing policy:
 - Verifier route: independent pass after drafting.
 
 Every routing decision is recorded in the spec ledger as a serializable `RouteRecord`.
+
+## Region-Aware Compute-Electricity Telemetry
+
+The next routing dimension is Google Cloud region, not only Gemini model. The design skeleton in [docs/design/gcp_compute_electricity_spread.md](docs/design/gcp_compute_electricity_spread.md) describes two joined telemetry layers:
+
+- Dynamic Google Cloud compute telemetry: Cloud Asset Inventory feeds, Cloud Monitoring metrics, Cloud Billing BigQuery export, and SKU pricing.
+- Regional electricity proxy telemetry: wholesale/grid price proxies near each Google Cloud region, with confidence scores.
+
+The caveat is central: Google Cloud does not expose the actual electricity price paid by a specific Google data center, and the app cannot choose an individual physical data center. The practical control surface is model-plus-region routing, using region power prices as a proxy signal.
+
+The skeleton files are:
+
+- [config/region_power_map.example.yaml](config/region_power_map.example.yaml): example Google region to power-market proxy map.
+- [sql/gcp_compute_billing_hourly.example.sql](sql/gcp_compute_billing_hourly.example.sql): billing export normalization view.
+- [sql/compute_electricity_spread_view.example.sql](sql/compute_electricity_spread_view.example.sql): joined spread proxy view.
+
+This is not live in the ADK runtime yet and should not trigger deployment, trading, settlement, or execution. Use it as a future scorer/judge feature for decisions like:
+
+```text
+selected_model = gemini-flash-latest
+selected_google_region = us-south1
+reason = lower estimated compute-electricity stress with acceptable latency
+```
 
 ## Safety Behavior
 
