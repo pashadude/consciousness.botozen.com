@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.model_armor import sanitize_user_prompt
 from app.router import should_refuse_for_safety
 from app.spec_state import EvidenceRef, SpecLedger, VerificationFinding
 
@@ -22,6 +23,11 @@ class VerificationResult:
 
 
 def safety_check(text: str) -> SafetyResult:
+    armor = sanitize_user_prompt(text)
+    if armor.checked and not armor.allowed:
+        return SafetyResult(allowed=False, reason=armor.reason)
+    if not armor.allowed:
+        return SafetyResult(allowed=False, reason=armor.reason)
     if should_refuse_for_safety(text):
         return SafetyResult(
             allowed=False,

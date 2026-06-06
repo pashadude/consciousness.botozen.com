@@ -41,11 +41,42 @@ The shared ledger is stored under `session.state["spec_ledger"]` as plain JSON f
 - high-impact ambiguities and clarification questions
 - artifact metadata references, not file bytes
 - evidence references and evidence IDs used in the draft
+- optional Gemini multimodal artifact matches, stored as evidence metadata
 - model routing history
 - workflow trajectory
 - verifier findings
 
 Uploaded files, PDFs, and images are stored with `Context.save_artifact` when inline binary parts are present. The ledger stores only filename, MIME type, artifact ID, and version.
+
+## Multimodal Retrieval
+
+`app/multimodal.py` implements an optional Gemini embedding retrieval layer for
+uploaded text, image, audio, video, and PDF artifacts. It follows the Colab
+pattern from "Gemini Embedding 2 - Complete Guide":
+
+- use Gemini Embedding 2 to map multiple modalities into one vector space
+- embed the user request and each eligible artifact part
+- rank artifacts with cosine similarity
+- write ranked matches back as `multimodal:*` evidence IDs
+
+The layer is enabled only when Google credentials are configured through either
+Gemini API key auth or the preferred grant-backed Vertex AI / Application
+Default Credentials path:
+
+- `GOOGLE_CLOUD_PROJECT`
+- `GOOGLE_CLOUD_LOCATION`
+- `GOOGLE_GENAI_USE_VERTEXAI=true`
+- `MULTIMODAL_RETRIEVAL_ENABLED=true`
+
+Policy controls:
+
+- `MULTIMODAL_ALLOWED_MIME_TYPES`
+- `MULTIMODAL_MAX_ARTIFACT_BYTES`
+- `MULTIMODAL_MAX_RESULTS`
+- `MULTIMODAL_OUTPUT_DIMENSIONALITY`
+
+The default dimensionality is 768 to control cost, latency, and storage while
+keeping the model configurable.
 
 ## MCP Research
 
@@ -76,6 +107,10 @@ The workflow records a `RouteRecord` for each stage. Low-risk extraction, classi
 - uncited external claims
 - required trajectory stages
 - unsafe requests involving phishing, malware, credential theft, or evasion
+
+When `MODEL_ARMOR_TEMPLATE` or `MODEL_ARMOR_TEMPLATE_ID` is configured,
+`app/model_armor.py` screens the latest user prompt with Google Cloud Model
+Armor before the local MVP safety policy is applied.
 
 Failed high-severity verification loops once through the graph and escalates synthesis. After one repair attempt, the agent finalizes with verifier findings instead of looping indefinitely.
 

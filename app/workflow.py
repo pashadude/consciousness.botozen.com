@@ -19,6 +19,7 @@ from google.adk.workflow import node
 from google.genai import types
 from mcp import StdioServerParameters
 
+from app.multimodal import add_multimodal_evidence_from_artifacts
 from app.router import CHEAP_MODEL, route_for_stage, should_refuse_for_safety
 from app.spec_state import (
     ArtifactRef,
@@ -95,10 +96,10 @@ mcp_research_agent = Agent(
 
 
 @node(name="ingest")
-def ingest_node(ctx: Context, node_input: Any = None) -> Event:
+async def ingest_node(ctx: Context, node_input: Any = None) -> Event:
     ledger = ledger_from_state(ctx.state)
     record_stage(ledger, "ingest")
-    artifact_refs = persist_upload_parts_as_artifacts(ctx)
+    artifact_refs = await persist_upload_parts_as_artifacts(ctx)
     text = text_from_content(node_input) or text_from_content(ctx.user_content)
     update_ledger_from_user_text(ledger, text, artifact_refs=artifact_refs)
     add_route(ledger, route_for_stage("ingest", ledger))
@@ -162,12 +163,13 @@ def apply_clarification_node(ctx: Context, node_input: Any = None) -> Event:
 
 
 @node(name="retrieve_evidence")
-def retrieve_evidence_node(ctx: Context, node_input: Any = None) -> Event:
+async def retrieve_evidence_node(ctx: Context, node_input: Any = None) -> Event:
     ledger = ledger_from_state(ctx.state)
     record_stage(ledger, "retrieve_evidence")
     ledger.status = "retrieving"
     add_route(ledger, route_for_stage("retrieve_evidence", ledger))
     add_evidence_from_artifacts(ledger)
+    await add_multimodal_evidence_from_artifacts(ctx, ledger)
     if MCP_RESEARCH_TOOLS:
         source = os.environ.get("MCP_RESEARCH_URL") or os.environ.get("MCP_RESEARCH_COMMAND") or "mcp://configured"
         add_mcp_evidence_placeholder(ledger, source)
@@ -269,7 +271,7 @@ def finalize_node(ctx: Context, node_input: Any = None) -> Event:
     )
 
 
-def persist_upload_parts_as_artifacts(ctx: Context) -> list[ArtifactRef]:
+async def persist_upload_parts_as_artifacts(ctx: Context) -> list[ArtifactRef]:
     refs: list[ArtifactRef] = []
     content = getattr(ctx, "user_content", None)
     parts = getattr(content, "parts", None) or []
@@ -284,8 +286,12 @@ def persist_upload_parts_as_artifacts(ctx: Context) -> list[ArtifactRef]:
         source_name = getattr(file_data, "file_uri", None) or f"upload_{index}"
         filename = safe_artifact_filename(source_name, mime_type=mime_type)
         version = None
+        note = "Stored as ADK artifact metadata in state; binary remains in artifact service."
         if inline_data:
-            version = ctx.save_artifact(filename, part)
+            try:
+                version = await ctx.save_artifact(filename, part)
+            except Exception:
+                note = "Artifact service unavailable; recorded upload metadata only."
         refs.append(
             ArtifactRef(
                 artifact_id=f"{filename}:v{version if version is not None else 'external'}",
@@ -293,7 +299,7 @@ def persist_upload_parts_as_artifacts(ctx: Context) -> list[ArtifactRef]:
                 mime_type=mime_type,
                 version=version,
                 source="upload",
-                note="Stored as ADK artifact metadata in state; binary remains in artifact service.",
+                note=note,
             )
         )
     return refs
@@ -308,6 +314,13 @@ def safe_artifact_filename(source_name: str, *, mime_type: str | None = None) ->
             "image/png": ".png",
             "image/jpeg": ".jpg",
             "image/webp": ".webp",
+            "audio/mpeg": ".mp3",
+            "audio/wav": ".wav",
+            "video/mp4": ".mp4",
+            "text/plain": ".txt",
+            "text/markdown": ".md",
+            "text/csv": ".csv",
+            "application/json": ".json",
         }.get(mime_type, "")
         basename += extension
     return basename[:120] or "upload"
