@@ -73,11 +73,15 @@ Recommended grant-aware defaults:
 
 ```bash
 export MULTIMODAL_RETRIEVAL_ENABLED=true
-export MULTIMODAL_EMBEDDING_MODEL=gemini-embedding-2
+export MULTIMODAL_EMBEDDING_MODEL=gemini-embedding-001
 export MULTIMODAL_OUTPUT_DIMENSIONALITY=768
 export MULTIMODAL_MAX_ARTIFACT_BYTES=4000000
 export MULTIMODAL_MAX_RESULTS=5
 ```
+
+`gemini-embedding-001` is the current documented Vertex AI Gemini embedding
+model ID. Keep this value unless your project-specific docs expose a newer
+embedding model.
 
 Use `GEMINI_API_KEY` only if you want Gemini API key auth instead of the
 Vertex AI / Google account path.

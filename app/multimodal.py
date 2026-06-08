@@ -65,7 +65,7 @@ def config_from_env() -> MultimodalConfig:
     )
     return MultimodalConfig(
         enabled=enabled,
-        model=os.environ.get("MULTIMODAL_EMBEDDING_MODEL", "gemini-embedding-2"),
+        model=os.environ.get("MULTIMODAL_EMBEDDING_MODEL", "gemini-embedding-001"),
         output_dimensionality=parse_optional_int(
             os.environ.get("MULTIMODAL_OUTPUT_DIMENSIONALITY"),
             default=768,

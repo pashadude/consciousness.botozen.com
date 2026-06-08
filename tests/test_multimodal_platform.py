@@ -43,7 +43,7 @@ def test_multimodal_config_uses_google_account_adc(monkeypatch) -> None:
     assert config.enabled
     assert config.use_vertexai
     assert config.can_call_google
-    assert config.model == "gemini-embedding-2"
+    assert config.model == "gemini-embedding-001"
     assert config.output_dimensionality == 768
 
 
@@ -66,7 +66,7 @@ def test_upsert_multimodal_evidence_records_ranked_artifact() -> None:
         artifact=artifact,
         score=0.82,
         dimensions=768,
-        model="gemini-embedding-2",
+        model="gemini-embedding-001",
         mime_type="image/png",
     )
 

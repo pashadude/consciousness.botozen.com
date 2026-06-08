@@ -25,9 +25,9 @@ def test_dashboard_marks_configured_google_services_blue() -> None:
         "GOOGLE_GENAI_USE_VERTEXAI": "true",
         "GOOGLE_CLOUD_PROJECT": "grant-project",
         "GOOGLE_CLOUD_LOCATION": "us-central1",
-        "MUTUAL_SPEC_CHEAP_MODEL": "gemini-flash-latest",
-        "MUTUAL_SPEC_STRONG_MODEL": "gemini-pro-latest",
-        "MUTUAL_SPEC_VERIFIER_MODEL": "gemini-pro-latest",
+        "MUTUAL_SPEC_CHEAP_MODEL": "gemini-3.5-flash",
+        "MUTUAL_SPEC_STRONG_MODEL": "gemini-3.5-flash",
+        "MUTUAL_SPEC_VERIFIER_MODEL": "gemini-3.5-flash",
         "MULTIMODAL_RETRIEVAL_ENABLED": "true",
         "MODEL_ARMOR_TEMPLATE_ID": "default-agent-policy",
         "BQ_ANALYTICS_ENABLED": "true",
@@ -41,9 +41,9 @@ def test_dashboard_marks_configured_google_services_blue() -> None:
     output = render_dashboard("Brent/WTI bounce?", env=env, color=False)
 
     assert "ON  Vertex AI Gemini auth" in output
-    assert "ON  Cheap model: gemini-flash-latest" in output
-    assert "ON  Strong model: gemini-pro-latest" in output
-    assert "ON  Verifier model: gemini-pro-latest" in output
+    assert "ON  Cheap model: gemini-3.5-flash" in output
+    assert "ON  Strong model: gemini-3.5-flash" in output
+    assert "ON  Verifier model: gemini-3.5-flash" in output
     assert "ON  Gemini multimodal embeddings" in output
     assert "ON  Model Armor" in output
     assert "ON  BigQuery analytics: adk_agent_analytics" in output
@@ -56,7 +56,7 @@ def test_dashboard_uses_green_blue_red_ansi_markers_when_color_enabled() -> None
         "GOOGLE_GENAI_USE_VERTEXAI": "true",
         "GOOGLE_CLOUD_PROJECT": "grant-project",
         "GOOGLE_CLOUD_LOCATION": "us-central1",
-        "MUTUAL_SPEC_CHEAP_MODEL": "gemini-flash-latest",
+        "MUTUAL_SPEC_CHEAP_MODEL": "gemini-3.5-flash",
     }
 
     output = render_dashboard("arb?", env=env, color=True)

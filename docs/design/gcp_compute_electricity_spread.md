@@ -7,9 +7,9 @@ also between Google Cloud regions. The routing target is a model-plus-region
 choice, for example:
 
 ```text
-gemini-flash-latest in us-central1
-gemini-pro-latest in us-east4
-gemini-flash-latest in europe-west3
+gemini-3.5-flash in us-central1
+gemini-3.5-flash in us-east4
+gemini-3.5-flash in europe-west3
 ```
 
 Google Cloud does not expose the actual electricity price paid by a specific
@@ -360,7 +360,7 @@ routing step should add a region dimension:
 
 ```text
 route = {
-  model: "gemini-flash-latest",
+  model: "gemini-3.5-flash",
   google_region: "us-central1",
   reason: "nondominated candidate: acceptable quality, lower cost, lower compute-electricity stress",
 }

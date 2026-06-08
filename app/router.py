@@ -17,17 +17,17 @@ class ModelProfile:
 
 CHEAP_MODEL = ModelProfile(
     model_class="cheap",
-    model_name=os.environ.get("MUTUAL_SPEC_CHEAP_MODEL", "gemini-flash-latest"),
+    model_name=os.environ.get("MUTUAL_SPEC_CHEAP_MODEL", "gemini-3.5-flash"),
     intended_use="low-risk classification, extraction, and summarization",
 )
 STRONG_MODEL = ModelProfile(
     model_class="strong",
-    model_name=os.environ.get("MUTUAL_SPEC_STRONG_MODEL", "gemini-pro-latest"),
+    model_name=os.environ.get("MUTUAL_SPEC_STRONG_MODEL", "gemini-3.5-flash"),
     intended_use="high-ambiguity synthesis and failed-verification repair",
 )
 VERIFIER_MODEL = ModelProfile(
     model_class="verifier",
-    model_name=os.environ.get("MUTUAL_SPEC_VERIFIER_MODEL", "gemini-pro-latest"),
+    model_name=os.environ.get("MUTUAL_SPEC_VERIFIER_MODEL", "gemini-3.5-flash"),
     intended_use="independent verifier pass after drafting",
 )
 

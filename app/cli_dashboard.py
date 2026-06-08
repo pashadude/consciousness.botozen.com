@@ -164,17 +164,17 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
         StatusItem(
             "Cheap model",
             "blue" if has_google_auth and configured_value(env.get("MUTUAL_SPEC_CHEAP_MODEL")) else "red",
-            env.get("MUTUAL_SPEC_CHEAP_MODEL", "gemini-flash-latest"),
+            env.get("MUTUAL_SPEC_CHEAP_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Strong model",
             "blue" if has_google_auth and configured_value(env.get("MUTUAL_SPEC_STRONG_MODEL")) else "red",
-            env.get("MUTUAL_SPEC_STRONG_MODEL", "gemini-pro-latest"),
+            env.get("MUTUAL_SPEC_STRONG_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Verifier model",
             "blue" if has_google_auth and configured_value(env.get("MUTUAL_SPEC_VERIFIER_MODEL")) else "red",
-            env.get("MUTUAL_SPEC_VERIFIER_MODEL", "gemini-pro-latest"),
+            env.get("MUTUAL_SPEC_VERIFIER_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Gemini multimodal embeddings",
@@ -182,7 +182,7 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
             if has_google_auth
             and parse_bool(env.get("MULTIMODAL_RETRIEVAL_ENABLED"), False)
             else "red",
-            env.get("MULTIMODAL_EMBEDDING_MODEL", "gemini-embedding-2"),
+            env.get("MULTIMODAL_EMBEDDING_MODEL", "gemini-embedding-001"),
         ),
         StatusItem(
             "Model Armor",

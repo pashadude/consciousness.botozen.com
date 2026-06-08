@@ -259,12 +259,13 @@ Uploaded files, PDFs, and images are stored with ADK artifact services. The ledg
 External retrieval is optional and configured through environment variables:
 
 ```bash
-# Streamable HTTP MCP server
-export MCP_RESEARCH_URL=https://your-mcp-server.example.com/mcp
+# Local Opoint stdio MCP server
+export OPOINT_API_KEY=your-opoint-api-key
+export MCP_RESEARCH_COMMAND="uv run opoint-mcp"
+export MCP_RESEARCH_CWD=/Users/pauldudko/VSProjects/mcp_opoint
 
-# or stdio MCP server
-export MCP_RESEARCH_COMMAND="npx -y @modelcontextprotocol/server-fetch"
-export MCP_RESEARCH_CWD=/optional/server/working/directory
+# or streamable HTTP MCP server
+# export MCP_RESEARCH_URL=https://your-mcp-server.example.com/mcp
 ```
 
 When MCP is configured, the workflow routes through `mcp_research_agent`, which is built with ADK's `McpToolset`. ADK supports MCP tools for connecting agents to external tool servers over stdio or remote transports. [6]
@@ -289,7 +290,7 @@ GOOGLE_CLOUD_LOCATION=us-central1
 GOOGLE_GENAI_USE_VERTEXAI=true
 
 MULTIMODAL_RETRIEVAL_ENABLED=true
-MULTIMODAL_EMBEDDING_MODEL=gemini-embedding-2
+MULTIMODAL_EMBEDDING_MODEL=gemini-embedding-001
 MULTIMODAL_OUTPUT_DIMENSIONALITY=768
 MULTIMODAL_MAX_ARTIFACT_BYTES=4000000
 MULTIMODAL_MAX_RESULTS=5
@@ -317,9 +318,9 @@ POWER_PRICE_SOURCE=manual
 # GRIDSTATUS_API_KEY=your-gridstatus-key
 # EIA_API_KEY=your-eia-key
 
-MUTUAL_SPEC_CHEAP_MODEL=gemini-flash-latest
-MUTUAL_SPEC_STRONG_MODEL=gemini-pro-latest
-MUTUAL_SPEC_VERIFIER_MODEL=gemini-pro-latest
+MUTUAL_SPEC_CHEAP_MODEL=gemini-3.5-flash
+MUTUAL_SPEC_STRONG_MODEL=gemini-3.5-flash
+MUTUAL_SPEC_VERIFIER_MODEL=gemini-3.5-flash
 ```
 
 ### Turn On Checklist
@@ -455,10 +456,12 @@ For local development, keep `MODEL_ARMOR_FAIL_CLOSED=false` so temporary auth or
 Routing is implemented in Python rather than through an experimental router abstraction:
 
 ```bash
-export MUTUAL_SPEC_CHEAP_MODEL=gemini-flash-latest
-export MUTUAL_SPEC_STRONG_MODEL=gemini-pro-latest
-export MUTUAL_SPEC_VERIFIER_MODEL=gemini-pro-latest
+export MUTUAL_SPEC_CHEAP_MODEL=gemini-3.5-flash
+export MUTUAL_SPEC_STRONG_MODEL=gemini-3.5-flash
+export MUTUAL_SPEC_VERIFIER_MODEL=gemini-3.5-flash
 ```
+
+Gemini 3.5 Flash is the current default workhorse because Google announced it as generally available for the Gemini API, Google AI Studio, Gemini Enterprise Agent Platform, and Gemini Enterprise, with agentic and coding performance aimed at long-horizon workflows. If your Google Cloud project exposes a stronger Pro-family model later, override `MUTUAL_SPEC_STRONG_MODEL` and optionally `MUTUAL_SPEC_VERIFIER_MODEL`; no code change is needed.
 
 Routing policy:
 
@@ -506,7 +509,7 @@ The skeleton files are:
 This is not live in the ADK runtime yet and should not trigger deployment, trading, settlement, or execution. Use it as a future scorer/judge feature for decisions like:
 
 ```text
-selected_model = gemini-flash-latest
+selected_model = gemini-3.5-flash
 selected_google_region = us-south1
 reason = lower estimated compute-electricity stress with acceptable latency
 ```
