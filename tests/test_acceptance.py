@@ -127,3 +127,23 @@ def test_python_side_model_routing_escalates_failed_verification() -> None:
     assert cheap.model_class == "cheap"
     assert strong.model_class == "strong"
     assert verifier.model_class == "verifier"
+
+
+def test_trader_prompt_builds_data_only_decision_frame() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(ledger, "look at HO/RB arb and give me risk on this spread")
+
+    assert ledger.expressed_query == "look at HO/RB arb and give me risk on this spread"
+    assert ledger.audience == "traders"
+    assert ledger.output_format == "decision frame"
+    assert ledger.decision_gate == "needs_more_info"
+    assert any("arbitrage" in item for item in ledger.latent_intent_hypotheses)
+    assert any("IBKR" in item and "do not place orders" in item for item in ledger.evidence_contract)
+    assert any("not a buy/sell recommendation" in item for item in ledger.verification_conditions)
+
+    draft = build_draft_from_ledger(ledger)
+
+    assert "Decision gate: needs_more_info" in draft
+    assert "Latent Intent Hypotheses" in draft
+    assert "Evidence Contract" in draft
+    assert "No broker order placement" in draft

@@ -19,6 +19,7 @@ from google.adk.workflow import node
 from google.genai import types
 from mcp import StdioServerParameters
 
+from app.formalization import formalize_ledger
 from app.multimodal import add_multimodal_evidence_from_artifacts
 from app.router import CHEAP_MODEL, route_for_stage, should_refuse_for_safety
 from app.spec_state import (
@@ -111,6 +112,7 @@ def hypothesize_spec_node(ctx: Context, node_input: Any = None) -> Event:
     ledger = ledger_from_state(ctx.state)
     record_stage(ledger, "hypothesize_spec")
     add_route(ledger, route_for_stage("hypothesize_spec", ledger))
+    formalize_ledger(ledger)
     if should_refuse_for_safety(ledger.user_request):
         route = "retrieve"
     elif needs_clarification(ledger):
@@ -154,6 +156,7 @@ def apply_clarification_node(ctx: Context, node_input: Any = None) -> Event:
     ledger = ledger_from_state(ctx.state)
     record_stage(ledger, "apply_clarification")
     apply_clarification_answer(ledger, node_input)
+    formalize_ledger(ledger)
     route = "clarify" if needs_clarification(ledger) else "retrieve"
     return Event(
         output=ledger.model_dump(mode="json"),

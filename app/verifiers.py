@@ -7,7 +7,12 @@ from dataclasses import dataclass
 
 from app.model_armor import sanitize_user_prompt
 from app.router import should_refuse_for_safety
-from app.spec_state import EvidenceRef, SpecLedger, VerificationFinding
+from app.spec_state import (
+    EvidenceRef,
+    FormalizationRecord,
+    SpecLedger,
+    VerificationFinding,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,13 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
     audience = ledger.audience or "UNRESOLVED: audience"
     output_format = ledger.output_format or "UNRESOLVED: output format"
     evidence_lines = format_evidence_lines(ledger.evidence)
+    latent_lines = format_optional_lines(ledger.latent_intent_hypotheses, empty="- None captured.")
+    evidence_contract_lines = format_optional_lines(ledger.evidence_contract, empty="- None captured.")
+    verification_condition_lines = format_optional_lines(
+        ledger.verification_conditions,
+        empty="- Standard verifier conditions only.",
+    )
+    formalization_lines = format_formalization_lines(ledger.formalization_records)
     assumption_lines = "\n".join(f"- {item}" for item in ledger.assumptions) or "- None."
     constraint_lines = "\n".join(f"- {item}" for item in ledger.constraints) or "- None captured."
     criteria_lines = (
@@ -50,9 +62,14 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
     return "\n".join(
         [
             "Executable Task Specification",
+            f"Expressed query: {ledger.expressed_query or ledger.user_request or 'UNRESOLVED: expressed query'}",
             f"Goal: {goal}",
             f"Audience: {audience}",
             f"Output format: {output_format}",
+            f"Decision gate: {ledger.decision_gate}",
+            "",
+            "Latent Intent Hypotheses",
+            latent_lines,
             "",
             "Success Criteria",
             criteria_lines,
@@ -60,13 +77,26 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
             "Constraints",
             constraint_lines,
             "",
+            "Evidence Contract",
+            evidence_contract_lines,
+            "",
             "Evidence Used",
             evidence_lines,
             "",
+            "Formalization",
+            formalization_lines,
+            "",
             "Assumptions",
             assumption_lines,
+            "",
+            "Verification Conditions",
+            verification_condition_lines,
         ]
     )
+
+
+def format_optional_lines(items: list[str], *, empty: str) -> str:
+    return "\n".join(f"- {item}" for item in items) if items else empty
 
 
 def format_evidence_lines(evidence: list[EvidenceRef]) -> str:
@@ -77,6 +107,24 @@ def format_evidence_lines(evidence: list[EvidenceRef]) -> str:
         f"- [{item.evidence_id}] {item.title}: {item.summary}"
         + (f" ({item.uri})" if item.uri else "")
         for item in used
+    )
+
+
+def format_formalization_lines(records: list[FormalizationRecord]) -> str:
+    if not records:
+        return "- No formalization record generated."
+    latest = records[-1]
+    missing = ", ".join(latest.missing_obligations) or "none"
+    question = latest.question or "none"
+    return "\n".join(
+        [
+            f"- Task: {latest.task_name}",
+            f"- Domain: {latest.domain}",
+            f"- Question: {question}",
+            f"- is_valid: {latest.is_valid}",
+            f"- class_id: {latest.class_id}",
+            f"- missing_obligations: {missing}",
+        ]
     )
 
 
@@ -119,6 +167,22 @@ def verify_draft(ledger: SpecLedger, draft: str) -> VerificationResult:
                 remediation="Add evidence IDs beside claims derived from evidence.",
             )
         )
+    if ledger.formalization_records:
+        latest_formalization = ledger.formalization_records[-1]
+        if latest_formalization.is_valid != 1:
+            severity = "high" if ledger.decision_gate != "needs_more_info" else "medium"
+            missing_obligations = ", ".join(latest_formalization.missing_obligations) or "unknown"
+            findings.append(
+                VerificationFinding(
+                    category="spec_gap",
+                    severity=severity,
+                    message=(
+                        f"Formalization task {latest_formalization.task_name} is incomplete; "
+                        f"missing obligation(s): {missing_obligations}."
+                    ),
+                    remediation="Keep the decision gate blocked or resolve the missing formal obligations.",
+                )
+            )
     findings.extend(detect_uncited_external_claims(draft, ledger.evidence))
     required_stages = ["ingest", "hypothesize_spec", "retrieve_evidence", "draft_output", "verify"]
     missing_stages = [stage for stage in required_stages if stage not in ledger.trajectory]

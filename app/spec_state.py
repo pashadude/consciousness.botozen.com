@@ -63,6 +63,23 @@ class VerificationFinding(BaseModel):
     remediation: str | None = None
 
 
+class FormalizationRecord(BaseModel):
+    """Problem/question/answer formalization record for a spec-game task."""
+
+    task_name: str
+    domain: Literal["general", "trader"]
+    problem: dict[str, Any] = Field(default_factory=dict)
+    question: str | None = None
+    answer: dict[str, Any] = Field(default_factory=dict)
+    hypothesis: dict[str, Any] = Field(default_factory=dict)
+    tokens: list[str] = Field(default_factory=list)
+    is_valid: Literal[-1, 0, 1]
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    missing_obligations: list[str] = Field(default_factory=list)
+    class_id: int | None = None
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class SpecLedger(BaseModel):
     """Compact JSON object persisted under session.state[STATE_KEY]."""
 
@@ -79,9 +96,19 @@ class SpecLedger(BaseModel):
         "finalized",
     ] = "ingesting"
     user_request: str = ""
+    expressed_query: str = ""
     goal: str | None = None
     audience: str | None = None
     output_format: str | None = None
+    latent_intent_hypotheses: list[str] = Field(default_factory=list)
+    evidence_contract: list[str] = Field(default_factory=list)
+    verification_conditions: list[str] = Field(default_factory=list)
+    decision_gate: Literal[
+        "needs_more_info",
+        "analysis_ready",
+        "alert_ready",
+        "decision_frame_ready",
+    ] = "needs_more_info"
     success_criteria: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list)
@@ -92,6 +119,7 @@ class SpecLedger(BaseModel):
     evidence: list[EvidenceRef] = Field(default_factory=list)
     evidence_used: list[str] = Field(default_factory=list)
     route_history: list[RouteRecord] = Field(default_factory=list)
+    formalization_records: list[FormalizationRecord] = Field(default_factory=list)
     trajectory: list[str] = Field(default_factory=list)
     drafts: list[str] = Field(default_factory=list)
     verification_findings: list[VerificationFinding] = Field(default_factory=list)
@@ -159,6 +187,7 @@ def update_ledger_from_user_text(
     text = (text or "").strip()
     if text:
         ledger.user_request = text
+        ledger.expressed_query = text
         ledger.turn_count += 1
         infer_spec_fields(ledger, text)
     for artifact in artifact_refs or []:
@@ -253,6 +282,7 @@ def infer_spec_fields(ledger: SpecLedger, text: str, *, fill_only: bool = False)
     for constraint in infer_constraints(text):
         if constraint not in ledger.constraints:
             ledger.constraints.append(constraint)
+    infer_trader_decision_context(ledger, text)
 
 
 def infer_goal(text: str) -> str | None:
@@ -345,6 +375,88 @@ def infer_constraints(text: str) -> list[str]:
         if any(token in lower for token in ("must", "should", "do not", "don't", "use ", "avoid")):
             constraints.append(sentence[:220])
     return constraints[:8]
+
+
+def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
+    if not looks_like_trader_query(text):
+        return
+    if not ledger.audience:
+        ledger.audience = "traders"
+    if not ledger.output_format:
+        ledger.output_format = "decision frame"
+    if not ledger.goal:
+        ledger.goal = "Reconstruct and verify the trading task specification from a compressed trader query."
+
+    add_unique(
+        ledger.latent_intent_hypotheses,
+        "The trader may be asking for a trade, analysis, alert, or strategy spec rather than a direct answer.",
+    )
+    lower = text.lower()
+    if any(token in lower for token in ("arb", "arbitrage", "ho/rb", "rbob", "ulsd", "crack")):
+        add_unique(ledger.latent_intent_hypotheses, "Check whether a physical or relative-value arbitrage exists.")
+    if any(token in lower for token in ("turkey", "sanction", "legal", "counterparty", "cheating")):
+        add_unique(ledger.latent_intent_hypotheses, "Check legal, sanctions, route, or counterparty risk before any trader decision.")
+    if any(token in lower for token in ("spread", "brent", "wti", "basis", "risk")):
+        add_unique(ledger.latent_intent_hypotheses, "Estimate basis, market, liquidity, and falsification risk for the spread or thesis.")
+
+    for item in (
+        "IBKR may be used for futures history and market data only; do not place orders or expose broker execution.",
+        "Yahoo Finance may be used only as a proxy/reference source and must carry calibration assumptions.",
+        "Commodity feeds must record freshness, entitlement, units, transform, confidence, and lookahead guard.",
+    ):
+        add_unique(ledger.evidence_contract, item)
+
+    for item in (
+        "Separate fact, assumption, bet, and unknown.",
+        "Include legal, logistics, sanctions, market, basis, and counterparty risk flags when relevant.",
+        "Return a decision frame for the trader, not a buy/sell recommendation.",
+        "Include falsification triggers and missing data before marking the frame ready.",
+    ):
+        add_unique(ledger.verification_conditions, item)
+
+    for item in (
+        "No broker order placement, execution management, or live trading workflow.",
+        "Trader keeps final decision ownership.",
+    ):
+        add_unique(ledger.constraints, item)
+
+    for item in (
+        "Output includes interpreted thesis, missing information, risk ledger, assumptions, verification checklist, and falsification triggers.",
+        "Output is a proof-carrying decision frame that the trader can inspect and explain.",
+    ):
+        add_unique(ledger.success_criteria, item)
+
+
+def looks_like_trader_query(text: str) -> bool:
+    lower = text.lower()
+    trader_tokens = (
+        "arb",
+        "arbitrage",
+        "basis",
+        "brent",
+        "wti",
+        "ho/rb",
+        "rbob",
+        "ulsd",
+        "spread",
+        "bitumen",
+        "oil",
+        "refined",
+        "counterparty",
+        "sanction",
+        "turkey",
+        "route",
+        "cargo",
+        "inventory",
+        "hedge",
+        "liquidity",
+    )
+    return any(token in lower for token in trader_tokens)
+
+
+def add_unique(values: list[str], item: str) -> None:
+    if item not in values:
+        values.append(item)
 
 
 def add_evidence_from_artifacts(ledger: SpecLedger) -> SpecLedger:

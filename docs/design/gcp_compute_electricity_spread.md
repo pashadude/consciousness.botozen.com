@@ -1,4 +1,4 @@
-# GCP Compute-Electricity Spread Telemetry
+# GCP Resource-Region Domination Telemetry
 
 ## Goal
 
@@ -14,35 +14,61 @@ gemini-flash-latest in europe-west3
 
 Google Cloud does not expose the actual electricity price paid by a specific
 Google data center, and customers generally select regions or zones rather than
-individual data centers. This design estimates a regional compute-electricity
-spread by joining Google Cloud compute/billing telemetry with regional wholesale
-power-market proxies.
+individual data centers. This design estimates region-level criteria by joining
+all-resource Google Cloud billing telemetry, compute/runtime telemetry, and
+regional wholesale power-market proxies.
 
-Treat the output as a signal and research feature, not settlement-grade proof of
-Google's internal power cost.
+Compute-electricity spread is one criterion in the routing game. It is not the
+whole objective and should not be collapsed into a fixed weighted sum before
+the domination step. Treat the output as a routing and research feature, not
+settlement-grade proof of Google's internal power cost.
 
 ## Two Joined Telemetry Layers
 
 | Layer | Purpose | Main outputs |
 | --- | --- | --- |
-| Dynamic Google Cloud compute telemetry | Track resource changes, runtime intensity, reservations, accelerator usage, and customer billing. | vCPU-hours, reservation changes, accelerator proxy usage, compute cost by project/region/hour. |
+| Dynamic Google Cloud resource telemetry | Track resource changes, runtime intensity where available, reservations, accelerator usage, and customer billing for all billable resources. | all-resource cost, resource classes, vCPU-hours, reservation changes, accelerator proxy usage, compute-adjacent cost by project/region/hour. |
 | Regional electricity proxy telemetry | Track wholesale/grid electricity price near the selected Google Cloud region. | price USD/MWh, source market, mapping confidence, carbon/CFE context. |
 
 The joined view estimates:
 
 ```text
-compute_electricity_spread_proxy
-  = gcp_compute_cost_or_revenue_usd - electricity_cost_proxy_usd
+candidate = (model, google_region)
+
+criteria(candidate) = {
+  policy_allowed,
+  model_quality_risk,
+  latency_ms,
+  all_resource_cost,
+  compute_electricity_spread_stress,
+  carbon_context_penalty,
+  proxy_confidence_penalty
+}
 ```
+
+Candidate `A` dominates candidate `B` when `A` satisfies the hard constraints,
+is no worse than `B` on every soft criterion within configured epsilon
+tolerances, and is strictly better than `B` on at least one soft criterion. The
+router should keep the nondominated frontier, then apply a narrow tie-break rule
+only if the frontier still has multiple candidates.
+
+All billable resources feed `all_resource_cost`. Compute, serverless
+compute, AI platform, GPU, and TPU usage also feed
+`compute_electricity_spread_stress` because they have the strongest available
+usage-to-kWh proxy.
 
 ## What Google Cloud Can Expose Dynamically
 
 ### Cloud Asset Inventory Feeds
 
 Cloud Asset Inventory feeds can publish real-time notifications for supported
-resource and policy changes at project, folder, or organization scope.
+resource and policy changes at project, folder, or organization scope. For
+all-resource mode, configure coverage across the supported asset types you care
+about at the chosen scope, then narrow with explicit asset-type allowlists only
+if event volume is too high.
 
-Track these assets first:
+Compute-heavy assets are the first high-value allowlist because they drive the
+electricity proxy:
 
 ```text
 compute.googleapis.com/Instance
@@ -50,7 +76,7 @@ compute.googleapis.com/Disk
 compute.googleapis.com/Reservation
 ```
 
-Example setup:
+Example compute-heavy starter setup:
 
 ```bash
 export PROJECT_ID="your-project-id"
@@ -74,7 +100,9 @@ gcloud asset feeds create compute-feed \
 
 This detects topology changes such as instance creation/deletion, machine type
 changes, disk changes, reservation creation/use, and accelerator-attached
-resource changes.
+resource changes. The all-resource criteria layer still uses Cloud Billing
+export for complete billable-resource coverage, including services that do not
+have useful runtime intensity metrics.
 
 ### Cloud Monitoring Metrics
 
@@ -102,8 +130,8 @@ locations, services, SKUs, labels, credits, and adjustments. The detailed export
 adds resource-level cost data for supported products such as Compute Engine,
 GKE, Cloud Run functions, and Cloud Run.
 
-Use a BigQuery view to normalize the export into hourly regional compute cost.
-See `sql/gcp_compute_billing_hourly.example.sql`.
+Use a BigQuery view to normalize the export into hourly regional cost for every
+billable resource. See `sql/gcp_resource_billing_hourly.example.sql`.
 
 ### Cloud Billing Pricing API Or Pricing Export
 
@@ -185,7 +213,25 @@ Spread proxy:
 
 ```text
 compute_electricity_spread_proxy
-  = gcp_compute_cost_or_revenue_usd - electricity_cost_proxy_usd
+  = compute_adjacent_cost_usd - electricity_cost_proxy_usd
+```
+
+Regional domination criteria:
+
+```text
+compute_electricity_spread_stress
+  = ABS(compute_electricity_spread_proxy) / confidence_weight
+
+criteria(candidate)
+  = [
+      policy_allowed,
+      model_quality_risk,
+      latency_ms,
+      all_resource_cost,
+      compute_electricity_spread_stress,
+      carbon_context_penalty,
+      proxy_confidence_penalty
+    ]
 ```
 
 The watt and PUE constants are calibratable coefficients. Do not present them as
@@ -193,18 +239,18 @@ ground truth.
 
 ## BigQuery Schemas
 
-### `gcp_compute_events`
+### `gcp_resource_events`
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `ts` | TIMESTAMP | Event timestamp from Cloud Asset Inventory. |
 | `project_id` | STRING | Google Cloud project. |
 | `asset_name` | STRING | Full asset name. |
-| `asset_type` | STRING | Example: `compute.googleapis.com/Instance`. |
+| `asset_type` | STRING | Example: `compute.googleapis.com/Instance` or another supported asset type. |
 | `region` | STRING | Derived from zone/location. |
 | `zone` | STRING | Compute zone when available. |
 | `machine_type` | STRING | Instance machine type when available. |
-| `action` | STRING | Create, delete, update, resize, reservation change. |
+| `action` | STRING | Create, delete, update, resize, reservation change, policy change, or service-specific change. |
 | `raw_asset_json` | JSON | Raw event payload. |
 
 ### `gcp_compute_metrics`
@@ -225,18 +271,21 @@ ground truth.
 | `accelerator_count` | FLOAT64 | Attached accelerator count when available. |
 | `accelerator_utilization` | FLOAT64 | Accelerator utilization proxy. |
 
-### `gcp_billing_usage`
+### `gcp_resource_billing_hourly`
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `hour` | TIMESTAMP | Hour bucket. |
 | `project_id` | STRING | Billing project. |
 | `region` | STRING | Billing location. |
-| `service` | STRING | Compute Engine, GKE, Cloud Run, etc. |
+| `service` | STRING | Compute Engine, GKE, Cloud Run, Cloud Storage, BigQuery, Vertex AI, etc. |
 | `sku` | STRING | Google Cloud SKU description. |
+| `resource_class` | STRING | Normalized class such as `compute`, `serverless_compute`, `storage`, `network`, `analytics`, `ai_platform`, or `managed_service`. |
 | `usage_amount` | FLOAT64 | Usage quantity. |
 | `usage_unit` | STRING | Usage unit. |
-| `cost` | NUMERIC | Cost before or after credits depending on view policy. |
+| `gross_cost` | NUMERIC | Cost before credits. |
+| `credits` | NUMERIC | Credits from the billing export. |
+| `net_cost` | NUMERIC | Cost plus credits. |
 | `currency` | STRING | Billing currency. |
 
 ### `region_power_prices`
@@ -251,7 +300,7 @@ ground truth.
 | `source` | STRING | EIA, GridStatus, ISO, ENTSO-E, Nord Pool, etc. |
 | `confidence` | STRING | Mapping confidence. |
 
-### `compute_electricity_spread`
+### `resource_region_criteria`
 
 | Column | Type | Notes |
 | --- | --- | --- |
@@ -260,10 +309,15 @@ ground truth.
 | `vcpu_hours` | FLOAT64 | Estimated active vCPU-hours. |
 | `gpu_hours` | FLOAT64 | Estimated GPU-hours, optional. |
 | `tpu_hours` | FLOAT64 | Estimated TPU-hours, optional. |
-| `estimated_kwh` | FLOAT64 | Estimated energy from coefficients. |
-| `gcp_compute_cost` | NUMERIC | Billing export cost. |
+| `estimated_compute_kwh` | FLOAT64 | Estimated compute/accelerator energy from coefficients. |
+| `all_resource_cost` | NUMERIC | Billing export cost across all resource classes. |
+| `compute_adjacent_cost` | NUMERIC | Compute, serverless compute, and AI platform cost. |
 | `electricity_cost_proxy` | FLOAT64 | Estimated energy proxy cost. |
-| `spread_proxy` | FLOAT64 | Compute cost minus electricity proxy cost. |
+| `compute_electricity_spread_proxy` | FLOAT64 | Compute-adjacent cost minus electricity proxy cost. |
+| `compute_electricity_spread_stress` | FLOAT64 | Absolute spread proxy adjusted by mapping confidence. |
+| `all_resource_cost_criterion` | FLOAT64 | Numeric criterion used for domination. |
+| `confidence_penalty_criterion` | FLOAT64 | Penalty criterion for low/unknown proxy confidence. |
+| `optional_tiebreak_score` | FLOAT64 | Secondary score only after nondominated filtering. |
 | `confidence` | STRING | Combined mapping/data confidence. |
 
 ## Architecture
@@ -272,7 +326,7 @@ ground truth.
 Cloud Asset Inventory Feed
   -> Pub/Sub
   -> Cloud Run or Dataflow consumer
-  -> BigQuery: gcp_compute_events
+  -> BigQuery: gcp_resource_events
 
 Cloud Monitoring API poller
   -> Cloud Scheduler every 1-5 minutes
@@ -280,7 +334,7 @@ Cloud Monitoring API poller
   -> BigQuery: gcp_compute_metrics
 
 Cloud Billing export
-  -> BigQuery: gcp_billing_usage
+  -> BigQuery: gcp_resource_billing_hourly
 
 Cloud Billing Pricing API or pricing export
   -> BigQuery: gcp_sku_prices
@@ -293,10 +347,10 @@ Google CFE / carbon table
   -> BigQuery: google_region_carbon_context
 
 BigQuery view
-  -> compute_electricity_spread_by_region_hour
+  -> resource_region_criteria_by_hour
 
 Agent routing/scoring feature
-  -> choose model plus Google Cloud region
+  -> choose nondominated model plus Google Cloud region candidate
 ```
 
 ## Routing Use
@@ -308,13 +362,14 @@ routing step should add a region dimension:
 route = {
   model: "gemini-flash-latest",
   google_region: "us-central1",
-  reason: "low ambiguity, lower regional spread stress, acceptable latency",
+  reason: "nondominated candidate: acceptable quality, lower cost, lower compute-electricity stress",
 }
 ```
 
-The compute-electricity spread should be an evidence feature for routing and
-judging. It must not bypass verifier checks or automatically trigger settlement,
-deployment, or trading actions.
+The all-resource criteria vector should be an evidence feature for routing and
+judging. Compute-electricity spread is one criterion inside that vector. It must
+not bypass verifier checks or automatically trigger settlement, deployment, or
+trading actions.
 
 ## Risk Register
 
@@ -324,6 +379,7 @@ deployment, or trading actions.
 | Region-to-grid mapping basis risk. | Wrong power market can distort signal. | Store confidence and notes per region. |
 | Billing export delay/schema drift. | Cost joins can lag or break. | Put billing logic behind views and inspect schema after export setup. |
 | Monitoring metric delay. | Minute-level routing can use stale usage. | Use lag-aware windows and quality flags. |
+| Weighted sums hide strategic tradeoffs. | A cheap but unsafe or low-quality route can win by arithmetic. | Use hard constraints and Pareto/nondominated filtering before tie-break scores. |
 | Carbon data is monthly/lagged or not assured. | Unsuitable for live routing. | Use CFE/carbon only as context or reconciliation. |
 | Coefficients for watts/PUE are assumptions. | kWh estimate can be materially wrong. | Calibrate and version coefficients. |
 | Model availability varies by region. | Region route may not support desired model. | Maintain a model-region availability map. |
@@ -333,7 +389,7 @@ deployment, or trading actions.
 
 | Stage | Include | Defer |
 | --- | --- | --- |
-| v0 | Region map, billing hourly view, spread view, design doc, one power-market source. | Live API consumers, automatic routing, settlement/execution. |
+| v0 | Region map, all-resource billing hourly view, resource-region criteria view, design doc, one power-market source. | Live API consumers, automatic routing, settlement/execution. |
 | v1 | Cloud Asset feed consumer, Monitoring poller, billing export ingestion, dashboard. | Per-workload kWh truth claims, individual data-center routing. |
 | v2 | Model-plus-region routing policy with latency/compliance guardrails. | Autonomous execution without verifier/judge approval. |
 

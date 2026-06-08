@@ -2,7 +2,33 @@
 
 ## Objective
 
-`mutual-spec-agent` is an ADK Python 2.x prototype for narrowing the gap between a user's latent task and an executable task specification. The agent treats task formation as a staged workflow, not a single chat response.
+`mutual-spec-agent` is an ADK Python 2.x prototype for narrowing the gap between a user's latent task and an executable task specification. The agent treats task formation as a staged workflow and game, not a single chat response.
+
+The coordination object is the evolving shared specification. The final answer
+is downstream of that specification.
+
+## Game Model
+
+A user query is a lossy signal of a richer latent task. The system therefore
+optimizes for convergence among:
+
+- the user's latent intent
+- the expressed query
+- an executable, verifiable specification
+
+The staged game composition is:
+
+| Stage | Game type | Output |
+| --- | --- | --- |
+| Elicitation | Cooperative partial-information game. | Candidate intent hypotheses and high-impact ambiguities. |
+| Dialogue | Signaling and commitment game under asymmetric information. | Accepted assumptions, constraints, success criteria, and deferrals. |
+| Retrieval | Evidence-selection game. | Evidence references, source confidence, and known gaps. |
+| Decision planning | Full-information graph game. | Tool plan, route plan, budgets, safety gates, and human decision preconditions. |
+| Verification | Checking game. | Pass/fail findings, repair loop, or refusal. |
+
+Routing across small models, frontier models, tools, verifiers, Codex-like
+executors, and human review should be based on expected specification gain,
+risk reduction, cost, latency, and user cognitive burden.
 
 ## ADK Basis
 
@@ -45,6 +71,18 @@ The shared ledger is stored under `session.state["spec_ledger"]` as plain JSON f
 - model routing history
 - workflow trajectory
 - verifier findings
+
+The intended spec-game extension is documented in
+`docs/design/mutual_specification_game.md`. It adds explicit fields for
+`expressed_query`, `latent_intent_hypotheses`, `commitments`,
+`evidence_contract`, `route_plan`, `verification_conditions`, and
+`decision_gate`.
+
+The implementation also includes a local formalization layer inspired by
+Axolver's task shape. It converts the ledger into deterministic
+`problem/question/answer/hypothesis` records and evaluates each hypothesis with
+an `is_valid` result plus missing obligations. This is implemented inside
+`app/formalization.py`; the repo does not depend on Axolver's training stack.
 
 Uploaded files, PDFs, and images are stored with `Context.save_artifact` when inline binary parts are present. The ledger stores only filename, MIME type, artifact ID, and version.
 
@@ -98,43 +136,141 @@ Routing is Python-side in `app/router.py`.
 
 The workflow records a `RouteRecord` for each stage. Low-risk extraction, classification, and retrieval summarization use the cheap route. Failed verification or revision loops escalate drafting to the strong route. Verification always records the verifier route.
 
-## Region-Aware Routing Telemetry
+## Trader Decision-State Instruction Layer
+
+Traders are the primary high-value user class because their prompts are
+compressed, high-stakes, and ambiguous signals of latent strategies under
+incomplete information. The agent should reconstruct and verify the trade,
+analysis, alert, or strategy specification. It should not execute and should not
+replace the trader's decision. The formalization task should expose unresolved
+proof obligations before a trader-facing frame can claim readiness.
+
+Use this mapping:
+
+```text
+theta = the real trading task
+q     = what the trader said in chat
+s     = executable specification of the trade, analysis, alert, or strategy
+```
+
+The expressed query `q` can be extremely lossy. "Look at HO/RB arb" may mean:
+
+- is there a physical arbitrage?
+- is the counterparty clean?
+- is this sanctions/legal suicide?
+- where is the basis risk?
+- what logistics or inventory constraint breaks the idea?
+- can I explain this quickly to a partner?
+- am I self-confirming a thesis I already want to trade?
+
+For trader tasks, the executable specification must include:
+
+- instrument universe and contract mapping
+- side, hedge legs, position convention, and horizon
+- rebalance time and liquidity window
+- signal formula and feature transforms
+- data-source contract, freshness requirements, and entitlement status
+- physical, legal, sanctions, logistics, and counterparty risk flags
+- lookahead and leakage controls
+- risk target, leverage, margin, and maximum lots
+- backtest, live-sim, transaction-cost, and correlation validation
+- human decision state: `needs_more_info`, `analysis_ready`, `alert_ready`, or `decision_frame_ready`
+- audit requirements for source rows, assumptions, simulations, risk checks, and PnL calculations
+
+Use `/Users/pauldudko/VSProjects/brent_strategy` as the local instruction
+pattern for trader-facing evidence and validation discipline:
+
+- IBKR supplies market data and futures history for this agent. Do not place
+  orders, manage broker execution, or expose an order workflow.
+- Yahoo Finance can provide free reference/proxy data such as OVX. Proxy
+  transforms must be labeled with calibration and confidence assumptions.
+- ClickHouse and JSONL streams provide reproducible data, simulation, and PnL
+  audit surfaces.
+- Sparta, Improm, ZenPulsar, Refinitiv/Enel, EIA, and similar feeds must be
+  tracked with freshness, units, transform, confidence, and lookahead controls.
+
+The preferred output for trader tasks is proof-carrying:
+
+- interpreted thesis
+- missing information
+- legal, logistics, market, basis, and counterparty risk ledger
+- assumptions and source contract
+- required documents or data
+- verification checklist
+- falsification triggers
+- decision frame for the trader
+
+## Region-Aware Multicriteria Domination
 
 The current router selects a model class. The next routing dimension is Google
-Cloud region. This should be implemented as a model-plus-region decision, not as
-a claim that the agent can select an individual physical data center.
+Cloud region. This should be implemented as a model-plus-region decision over a
+multicriteria domination relation, not as a claim that the agent can select an
+individual physical data center and not as a single weighted utility function.
 
 The design skeleton is in `docs/design/gcp_compute_electricity_spread.md` with
 supporting examples:
 
 - `config/region_power_map.example.yaml`
-- `sql/gcp_compute_billing_hourly.example.sql`
-- `sql/compute_electricity_spread_view.example.sql`
+- `sql/gcp_resource_billing_hourly.example.sql`
+- `sql/resource_region_criteria_view.example.sql`
 
 The telemetry layer joins:
 
-- Cloud Asset Inventory resource-change events
+- Cloud Asset Inventory resource-change events for supported asset types
 - Cloud Monitoring CPU/reservation/accelerator metrics
-- Cloud Billing BigQuery export costs and usage
+- Cloud Billing BigQuery export costs and usage for all billable resources
 - Cloud Billing Pricing API or pricing export data
 - regional wholesale electricity price proxies
 - Google regional CFE/carbon context
 
-The output is a compute-electricity spread proxy by region and hour. It is a
-routing/scoring signal only. Google Cloud does not expose actual data-center
-electricity prices or exact workload-level kWh, so the view must carry
-confidence scores and coefficient assumptions.
+The output is a criteria vector by region and hour. The router should compare
+model-region candidates with a partial order:
+
+```text
+candidate = (model, google_region)
+
+criteria(candidate) = {
+  policy_allowed,
+  model_quality_risk,
+  latency_ms,
+  all_resource_cost,
+  compute_electricity_spread_stress,
+  carbon_context_penalty,
+  proxy_confidence_penalty
+}
+
+A dominates B iff:
+  A satisfies hard constraints
+  A is no worse than B on every soft criterion within epsilon
+  A is strictly better than B on at least one soft criterion
+```
+
+The router keeps the nondominated frontier first. A scalar score can be used
+only as a secondary tie-breaker after domination leaves multiple candidates.
+
+All billable resources contribute through `all_resource_cost`. Compute,
+serverless compute, AI platform, GPU, and TPU usage also contribute through
+`compute_electricity_spread_stress` because they have the strongest available
+usage-to-kWh proxy. Storage, networking, BigQuery, and managed services stay in
+the criteria vector through billing cost, region, carbon context, and confidence
+penalties until stronger energy coefficients exist.
+
+Google Cloud does not expose actual data-center electricity prices or exact
+workload-level kWh, so the view must carry confidence scores and coefficient
+assumptions.
 
 Future route records can add:
 
 - selected Google region
-- regional spread proxy
+- all-resource regional cost
+- nondominated-frontier rank
+- compute-electricity spread proxy
 - power proxy source
 - mapping confidence
 - latency/compliance constraints
 
-This signal must not bypass verification, policy checks, deployment controls, or
-any external settlement/execution rail.
+This domination layer must not bypass verification, policy checks, deployment
+controls, or any external settlement/execution rail.
 
 ## Verification
 
