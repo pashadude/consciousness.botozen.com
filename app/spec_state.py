@@ -50,6 +50,18 @@ class RouteRecord(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
+class AsyncJobRef(BaseModel):
+    """Reference to deferred work kicked off by a light-model route decision."""
+
+    job_id: str
+    kind: str
+    status: Literal["queued", "running", "succeeded", "failed"] = "queued"
+    reasons: list[str] = Field(default_factory=list)
+    result_ref: str | None = None
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class VerificationFinding(BaseModel):
     category: Literal[
         "spec_gap",
@@ -93,6 +105,7 @@ class SpecLedger(BaseModel):
         "retrieving",
         "drafting",
         "verifying",
+        "async_pending",
         "finalized",
     ] = "ingesting"
     user_request: str = ""
@@ -119,6 +132,7 @@ class SpecLedger(BaseModel):
     evidence: list[EvidenceRef] = Field(default_factory=list)
     evidence_used: list[str] = Field(default_factory=list)
     route_history: list[RouteRecord] = Field(default_factory=list)
+    async_jobs: list[AsyncJobRef] = Field(default_factory=list)
     formalization_records: list[FormalizationRecord] = Field(default_factory=list)
     trajectory: list[str] = Field(default_factory=list)
     drafts: list[str] = Field(default_factory=list)

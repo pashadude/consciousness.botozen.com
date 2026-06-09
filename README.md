@@ -270,6 +270,40 @@ export MCP_RESEARCH_CWD=/Users/pauldudko/VSProjects/mcp_opoint
 
 When MCP is configured, the workflow routes through `mcp_research_agent`, which is built with ADK's `McpToolset`. ADK supports MCP tools for connecting agents to external tool servers over stdio or remote transports. [6]
 
+## Async Escalation Jobs
+
+The light route can hand off high-gain work to a local async queue instead of
+doing all expensive retrieval and verification in the first turn. This is
+disabled by default so local evals stay deterministic.
+
+```bash
+export ASYNC_JOB_ENABLED=true
+export ASYNC_JOB_STORE_PATH=app/.adk/async_jobs.jsonl
+```
+
+When enabled, trader prompts, failed verifier loops, artifact-heavy requests,
+MCP/Opoint research, or resource-region telemetry contexts can enqueue a
+`deep_research_and_verification` job. The job envelope records the current
+ledger, route reasons, expected specification gain, recent model routes, and
+formalization obligations. The first implementation is append-only JSONL under
+`app/.adk/`; later it can move to Pub/Sub, Cloud Tasks, Cloud Run Jobs, or
+BigQuery without changing the route decision contract.
+
+Inspect local jobs:
+
+```bash
+uv run mutual-spec-jobs list
+uv run mutual-spec-jobs list --pending
+```
+
+Mark a local job complete after an external worker or manual analysis returns:
+
+```bash
+uv run mutual-spec-jobs complete job-abc123 \
+  --result-ref local://result/job-abc123 \
+  --summary "Verified decision frame ready for review."
+```
+
 ## Multimodal Retrieval
 
 The repo now includes an optional Gemini multimodal retrieval layer based on the "Gemini Embedding 2 - Complete Guide" Colab pattern: embed text, images, audio, video, and PDFs into one vector space, rank with cosine similarity, and keep lower dimensions for cost and latency control.
@@ -317,6 +351,9 @@ REGION_POWER_MAP_PATH=config/region_power_map.example.yaml
 POWER_PRICE_SOURCE=manual
 # GRIDSTATUS_API_KEY=your-gridstatus-key
 # EIA_API_KEY=your-eia-key
+
+ASYNC_JOB_ENABLED=false
+ASYNC_JOB_STORE_PATH=app/.adk/async_jobs.jsonl
 
 MUTUAL_SPEC_CHEAP_MODEL=gemini-3.5-flash
 MUTUAL_SPEC_STRONG_MODEL=gemini-3.5-flash

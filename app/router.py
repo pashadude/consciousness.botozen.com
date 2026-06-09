@@ -4,8 +4,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 
-from app.spec_state import RouteRecord, SpecLedger, needs_clarification
+from app.spec_state import (
+    RouteRecord,
+    SpecLedger,
+    looks_like_trader_query,
+    needs_clarification,
+)
 
 
 @dataclass(frozen=True)
@@ -13,6 +19,19 @@ class ModelProfile:
     model_class: str
     model_name: str
     intended_use: str
+
+
+@dataclass(frozen=True)
+class AsyncRouteDecision:
+    mode: Literal["sync", "async"]
+    job_kind: str
+    reasons: tuple[str, ...]
+    risk_score: int
+    expected_spec_gain: Literal["low", "medium", "high"]
+
+    @property
+    def should_enqueue(self) -> bool:
+        return self.mode == "async"
 
 
 CHEAP_MODEL = ModelProfile(
@@ -64,6 +83,90 @@ def route_for_stage(
         model_class=profile.model_class,  # type: ignore[arg-type]
         reason=reason,
     )
+
+
+def route_async_decision(
+    ledger: SpecLedger,
+    *,
+    mcp_configured: bool = False,
+    telemetry_enabled: bool = False,
+    artifact_count: int | None = None,
+    failed_verification: bool = False,
+) -> AsyncRouteDecision:
+    """Decide whether the light route should defer deeper work to a job.
+
+    This does not call a model. It is the deterministic control surface that a
+    cheap model can feed later: if any high-gain condition is present, the
+    workflow can enqueue a strong/tool-heavy job instead of blocking the turn.
+    """
+
+    reasons: list[str] = []
+    risk_score = 0
+    query = ledger.expressed_query or ledger.user_request
+    artifact_count = len(ledger.artifact_refs) if artifact_count is None else artifact_count
+
+    if needs_clarification(ledger):
+        return AsyncRouteDecision(
+            mode="sync",
+            job_kind="clarification",
+            reasons=("material_spec_fields_missing",),
+            risk_score=0,
+            expected_spec_gain="medium",
+        )
+
+    if failed_verification or any(item.severity == "high" for item in ledger.verification_findings):
+        reasons.append("verifier_failed")
+        risk_score += 3
+
+    if looks_like_trader_query(query):
+        reasons.append("high_stakes_trader_decision_frame")
+        risk_score += 2
+
+    if mcp_configured:
+        reasons.append("external_mcp_research_available")
+        risk_score += 1
+
+    if telemetry_enabled:
+        reasons.append("resource_region_telemetry_available")
+        risk_score += 1
+
+    if artifact_count > 0:
+        reasons.append("artifact_retrieval_or_embedding_needed")
+        risk_score += 1
+
+    latest_formalization = ledger.formalization_records[-1] if ledger.formalization_records else None
+    if latest_formalization and latest_formalization.is_valid != 1:
+        reasons.append("formal_obligations_missing")
+        risk_score += 1
+
+    if any(token in query.lower() for token in ("risk", "legal", "sanction", "counterparty", "route", "position", "execute")):
+        reasons.append("risk_or_policy_sensitive_prompt")
+        risk_score += 1
+
+    mode: Literal["sync", "async"] = "async" if risk_score >= 2 else "sync"
+    gain: Literal["low", "medium", "high"]
+    if risk_score >= 4:
+        gain = "high"
+    elif risk_score >= 2:
+        gain = "medium"
+    else:
+        gain = "low"
+    return AsyncRouteDecision(
+        mode=mode,
+        job_kind="deep_research_and_verification" if mode == "async" else "sync_spec_response",
+        reasons=tuple(reasons or ["low_risk_sync_path"]),
+        risk_score=risk_score,
+        expected_spec_gain=gain,
+    )
+
+
+def async_jobs_enabled() -> bool:
+    return os.environ.get("ASYNC_JOB_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def safety_risk_score(text: str) -> int:

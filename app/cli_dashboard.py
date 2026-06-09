@@ -119,6 +119,11 @@ def design_status(env: Mapping[str, str]) -> list[StatusItem]:
             "implemented in app/formalization.py",
         ),
         StatusItem(
+            "Async escalation jobs",
+            "green" if parse_bool(env.get("ASYNC_JOB_ENABLED"), False) else "red",
+            "light route can enqueue strong/tool-heavy jobs",
+        ),
+        StatusItem(
             "Multimodal artifact retrieval",
             "green" if parse_bool(env.get("MULTIMODAL_RETRIEVAL_ENABLED"), False) else "red",
             "enabled by MULTIMODAL_RETRIEVAL_ENABLED",
@@ -147,9 +152,7 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
     model_armor = configured_value(env.get("MODEL_ARMOR_TEMPLATE")) or (
         configured_value(env.get("MODEL_ARMOR_TEMPLATE_ID")) and project
     )
-    mcp = configured_value(env.get("MCP_RESEARCH_URL")) or configured_value(
-        env.get("MCP_RESEARCH_COMMAND")
-    )
+    mcp = configured_mcp(env)
     return [
         StatusItem(
             "Vertex AI Gemini auth",
@@ -201,7 +204,7 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
         StatusItem(
             "MCP research tools",
             "blue" if mcp else "red",
-            "MCP_RESEARCH_URL or MCP_RESEARCH_COMMAND",
+            "MCP_RESEARCH_URL or MCP_RESEARCH_COMMAND (+ OPOINT_API_KEY for Opoint)",
         ),
     ]
 
@@ -321,6 +324,18 @@ def configured_value(value: str | None) -> str | None:
     if not lowered or lowered.startswith("your-") or lowered in {"none", "null"}:
         return None
     return value
+
+
+def configured_mcp(env: Mapping[str, str]) -> str | None:
+    remote = configured_value(env.get("MCP_RESEARCH_URL"))
+    if remote:
+        return remote
+    command = configured_value(env.get("MCP_RESEARCH_COMMAND"))
+    if not command:
+        return None
+    if "opoint" in command.lower() and not configured_value(env.get("OPOINT_API_KEY")):
+        return None
+    return command
 
 
 def parse_bool(value: str | None, default: bool) -> bool:

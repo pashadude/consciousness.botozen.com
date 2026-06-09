@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 mutual-spec-dashboard = "app.cli_dashboard:main"
+mutual-spec-jobs = "app.jobs_cli:main"
 
 [dependency-groups]
 dev = [

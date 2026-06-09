@@ -53,6 +53,7 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
         empty="- Standard verifier conditions only.",
     )
     formalization_lines = format_formalization_lines(ledger.formalization_records)
+    async_job_lines = format_async_job_lines(ledger.async_jobs)
     assumption_lines = "\n".join(f"- {item}" for item in ledger.assumptions) or "- None."
     constraint_lines = "\n".join(f"- {item}" for item in ledger.constraints) or "- None captured."
     criteria_lines = (
@@ -85,6 +86,9 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
             "",
             "Formalization",
             formalization_lines,
+            "",
+            "Async Jobs",
+            async_job_lines,
             "",
             "Assumptions",
             assumption_lines,
@@ -125,6 +129,16 @@ def format_formalization_lines(records: list[FormalizationRecord]) -> str:
             f"- class_id: {latest.class_id}",
             f"- missing_obligations: {missing}",
         ]
+    )
+
+
+def format_async_job_lines(jobs: list[object]) -> str:
+    if not jobs:
+        return "- No async jobs queued."
+    return "\n".join(
+        f"- {getattr(job, 'job_id', 'unknown')}: {getattr(job, 'status', 'unknown')} "
+        f"({', '.join(getattr(job, 'reasons', []) or ['no reason recorded'])})"
+        for job in jobs
     )
 
 

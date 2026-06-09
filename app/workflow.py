@@ -20,8 +20,15 @@ from google.genai import types
 from mcp import StdioServerParameters
 
 from app.formalization import formalize_ledger
+from app.jobs import enqueue_async_job
 from app.multimodal import add_multimodal_evidence_from_artifacts
-from app.router import CHEAP_MODEL, route_for_stage, should_refuse_for_safety
+from app.router import (
+    CHEAP_MODEL,
+    async_jobs_enabled,
+    route_async_decision,
+    route_for_stage,
+    should_refuse_for_safety,
+)
 from app.spec_state import (
     ArtifactRef,
     add_evidence_from_artifacts,
@@ -42,6 +49,7 @@ WORKFLOW_STAGE_ORDER = [
     "ingest",
     "hypothesize_spec",
     "ask_clarification",
+    "enqueue_async_job",
     "retrieve_evidence",
     "draft_output",
     "verify",
@@ -63,6 +71,8 @@ def build_mcp_research_tools() -> list[McpToolset]:
 
     command_line = os.environ.get("MCP_RESEARCH_COMMAND")
     if command_line:
+        if "opoint" in command_line.lower() and not os.environ.get("OPOINT_API_KEY"):
+            return []
         parts = shlex.split(command_line)
         if not parts:
             return []
@@ -118,6 +128,12 @@ def hypothesize_spec_node(ctx: Context, node_input: Any = None) -> Event:
     elif needs_clarification(ledger):
         build_clarification_question(ledger)
         route = "clarify"
+    elif async_jobs_enabled() and route_async_decision(
+        ledger,
+        mcp_configured=bool(MCP_RESEARCH_TOOLS),
+        telemetry_enabled=env_flag("RESOURCE_REGION_DOMINATION_ENABLED"),
+    ).should_enqueue:
+        route = "async"
     else:
         route = "retrieve"
     return Event(
@@ -157,10 +173,46 @@ def apply_clarification_node(ctx: Context, node_input: Any = None) -> Event:
     record_stage(ledger, "apply_clarification")
     apply_clarification_answer(ledger, node_input)
     formalize_ledger(ledger)
-    route = "clarify" if needs_clarification(ledger) else "retrieve"
+    if needs_clarification(ledger):
+        route = "clarify"
+    elif async_jobs_enabled() and route_async_decision(
+        ledger,
+        mcp_configured=bool(MCP_RESEARCH_TOOLS),
+        telemetry_enabled=env_flag("RESOURCE_REGION_DOMINATION_ENABLED"),
+    ).should_enqueue:
+        route = "async"
+    else:
+        route = "retrieve"
     return Event(
         output=ledger.model_dump(mode="json"),
         route=route,
+        state=ledger_to_state(ledger),
+    )
+
+
+@node(name="enqueue_async_job")
+def enqueue_async_job_node(ctx: Context, node_input: Any = None) -> Event:
+    ledger = ledger_from_state(ctx.state)
+    record_stage(ledger, "enqueue_async_job")
+    decision = route_async_decision(
+        ledger,
+        mcp_configured=bool(MCP_RESEARCH_TOOLS),
+        telemetry_enabled=env_flag("RESOURCE_REGION_DOMINATION_ENABLED"),
+    )
+    job = enqueue_async_job(ledger, decision)
+    ledger.status = "async_pending"
+    message = "\n".join(
+        [
+            f"Queued async specification job `{job.job_id}`.",
+            f"Kind: {job.kind}",
+            f"Expected spec gain: {job.expected_spec_gain}",
+            f"Reasons: {', '.join(job.reasons)}",
+            "The light route has preserved the current spec and deferred deeper tool/model work.",
+        ]
+    )
+    return Event(
+        content=types.Content(role="model", parts=[types.Part.from_text(text=message)]),
+        output={"job_id": job.job_id, "status": job.status, "reasons": job.reasons},
         state=ledger_to_state(ledger),
     )
 
@@ -329,6 +381,10 @@ def safe_artifact_filename(source_name: str, *, mime_type: str | None = None) ->
     return basename[:120] or "upload"
 
 
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_workflow() -> Workflow:
     return Workflow(
         name="root_agent",
@@ -343,6 +399,7 @@ def build_workflow() -> Workflow:
                 hypothesize_spec_node,
                 {
                     "clarify": (ask_clarification_node, apply_clarification_node),
+                    "async": enqueue_async_job_node,
                     "retrieve": retrieve_evidence_node,
                 },
             ),
@@ -350,6 +407,7 @@ def build_workflow() -> Workflow:
                 apply_clarification_node,
                 {
                     "clarify": ask_clarification_node,
+                    "async": enqueue_async_job_node,
                     "retrieve": retrieve_evidence_node,
                 },
             ),

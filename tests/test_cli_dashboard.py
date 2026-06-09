@@ -66,6 +66,27 @@ def test_dashboard_uses_green_blue_red_ansi_markers_when_color_enabled() -> None
     assert "\033[31mNO\033[0m" in output
 
 
+def test_dashboard_requires_opoint_key_for_opoint_mcp() -> None:
+    output = render_dashboard(
+        "test",
+        env={"MCP_RESEARCH_COMMAND": "uv run opoint-mcp"},
+        color=False,
+    )
+
+    assert "NO  MCP research tools" in output
+
+    output_with_key = render_dashboard(
+        "test",
+        env={
+            "MCP_RESEARCH_COMMAND": "uv run opoint-mcp",
+            "OPOINT_API_KEY": "key",
+        },
+        color=False,
+    )
+
+    assert "ON  MCP research tools" in output_with_key
+
+
 def test_estimate_spend_uses_env_coefficients() -> None:
     spend = estimate_spend(
         "abcd",
