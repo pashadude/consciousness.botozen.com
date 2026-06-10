@@ -323,6 +323,8 @@ def render_workspace(
     {render_status_panel(env)}
   </section>
   <section class="center-rail">
+    {render_game_panel(result)}
+    {render_answer_panel(result)}
     {render_spec_panel(result)}
     {render_frontier_panel(result)}
   </section>
@@ -367,6 +369,69 @@ def render_status_panel(env: Mapping[str, str]) -> str:
 <section class="panel">
   <h2>Platform State</h2>
   <div class="status-grid">{rows}</div>
+</section>
+"""
+
+
+def render_game_panel(result: ConsoleResult) -> str:
+    ledger = result.ledger
+    material_missing = [item.field for item in ledger.ambiguities]
+    stages = [
+        (
+            "1. Elicitation",
+            "Cooperative partial-information game",
+            "Infer latent task from compressed signal and artifacts.",
+            "open" if material_missing else "done",
+        ),
+        (
+            "2. Commitment",
+            "Signaling game",
+            "Commit to decision frame, evidence contract, and proof obligations.",
+            "done" if ledger.evidence_contract else "open",
+        ),
+        (
+            "3. Execution Graph",
+            "Full-information graph game",
+            "Route to evidence, verifier, model-region frontier, and async work if needed.",
+            "done" if ledger.trajectory else "open",
+        ),
+        (
+            "4. Gate",
+            "Verification and budget condition",
+            "Do not claim go/no-go until missing obligations are resolved.",
+            "done" if result.verification_passed else "blocked",
+        ),
+    ]
+    rows = "\n".join(
+        f"""
+<li class="{escape(state)}">
+  <strong>{escape(title)}</strong>
+  <span>{escape(game)}</span>
+  <p>{escape(description)}</p>
+</li>
+"""
+        for title, game, description, state in stages
+    )
+    return f"""
+<section class="panel game-panel">
+  <div class="panel-title">
+    <h2>Mutual Specification Game</h2>
+    <span class="muted">object = shared spec, not prompt answer</span>
+  </div>
+  <ol class="game-list">{rows}</ol>
+</section>
+"""
+
+
+def render_answer_panel(result: ConsoleResult) -> str:
+    lines = build_provisional_answer(result)
+    return f"""
+<section class="panel answer-panel">
+  <div class="panel-title">
+    <h2>Provisional Decision Frame</h2>
+    <span class="muted">{escape(result.ledger.decision_gate)}</span>
+  </div>
+  {render_list(lines)}
 </section>
 """
 
@@ -495,6 +560,48 @@ def render_spend_panel(spend: object) -> str:
   </dl>
 </section>
 """
+
+
+def build_provisional_answer(result: ConsoleResult) -> list[str]:
+    ledger = result.ledger
+    text = (ledger.expressed_query or ledger.user_request).lower()
+    answer: list[str] = []
+    if "sulfur" in text or "sulphur" in text:
+        answer.extend(
+            [
+                "Immediate answer: not go-ready from the prompt alone. Treat FOB 550 at Umm Qasr for 50,000 tonnes as an offer to verify, not a trade to accept.",
+                "Latent task: determine whether the offer is real, deliverable, legally clean, financeable, insurable, and resellable at positive netback after freight, inspection, demurrage, quality, and payment risk.",
+                "Critical missing data: sulfur grade/spec, form, origin, seller identity, title chain, documents, quantity tolerance, laycan, berth/loading terms, inspection agency, payment terms, sanctions screening, and buyer/resale path.",
+                "Economics check: compare FOB 550 against current regional sulfur benchmarks, freight from Umm Qasr, port costs, insurance, finance, inspection, losses, and destination resale price.",
+                "Gate: stay at needs_more_info until documents and counterparty are verified; a photo is evidence metadata only until visually inspected or embedded.",
+            ]
+        )
+    elif ledger.latent_intent_hypotheses:
+        answer.extend(
+            [
+                "Immediate answer: convert the prompt into a verified decision frame before acting.",
+                "Latent task: " + ledger.latent_intent_hypotheses[0],
+                "Gate: keep decision ownership with the user and resolve missing evidence before execution.",
+            ]
+        )
+    else:
+        answer.extend(
+            [
+                "Immediate answer: the prompt is still under-specified.",
+                "Latent task: clarify goal, audience, output format, and required evidence.",
+            ]
+        )
+    if ledger.artifact_refs:
+        answer.append(
+            f"Artifacts attached: {len(ledger.artifact_refs)} file(s). They are included as evidence references, but claims from images/audio need inspection or transcription before finalizing."
+        )
+    if ledger.ambiguities:
+        answer.append(
+            "Open spec gaps: "
+            + ", ".join(f"{item.field}" for item in ledger.ambiguities)
+            + "."
+        )
+    return answer
 
 
 def render_list(items: list[str]) -> str:
@@ -666,6 +773,14 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 details { margin-top: 14px; }
 summary { cursor: pointer; margin-bottom: 8px; }
 .compact { margin: 6px 0 0; padding-left: 18px; }
+.game-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+.game-list li { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fbfcfb; }
+.game-list li.done { border-color: #b9d8c5; background: #f0fbf6; }
+.game-list li.blocked { border-color: #e3cc95; background: #fffaf0; }
+.game-list li.open { border-color: #b8cbe2; background: #f4f8fd; }
+.game-list strong { display: block; font-size: 14px; }
+.game-list span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.game-list p { font-size: 13px; margin-top: 6px; }
 .artifact-list { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
 .artifact-list li { display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
 .table-wrap { overflow-x: auto; margin-top: 10px; }

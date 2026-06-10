@@ -55,3 +55,28 @@ def test_console_api_accepts_speech_text_and_audio(tmp_path, monkeypatch) -> Non
     assert payload["route_decision"]["mode"] in {"sync", "async"}
     assert payload["frontier"]
 
+
+def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
+    client = TestClient(app)
+
+    query = (
+        "Look i have an offer of 50000 tonns of sulfur in Iraq, "
+        "Umm Qasr, fob 550, should i go for it?"
+    )
+    response = client.post(
+        "/spec",
+        data={"query": query},
+        files={"files": ("offer.png", b"fake-offer-image", "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert "Mutual Specification Game" in response.text
+    assert "Provisional Decision Frame" in response.text
+    assert "not go-ready" in response.text
+    assert "needs_more_info" in response.text
+    assert "audience</span><p>traders" in response.text
+    assert "format</span><p>decision frame" in response.text
+    assert "Reconstruct whether the commodity offer is executable" in response.text
+    assert "offer.png" in response.text
+    assert "image/png" in response.text

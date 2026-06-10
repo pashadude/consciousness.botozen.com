@@ -147,3 +147,18 @@ def test_trader_prompt_builds_data_only_decision_frame() -> None:
     assert "Latent Intent Hypotheses" in draft
     assert "Evidence Contract" in draft
     assert "No broker order placement" in draft
+
+
+def test_physical_commodity_offer_builds_trader_decision_frame() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "Look i have an offer of 50000 tonns of sulfur in Iraq, Umm Qasr, fob 550, should i go for it?",
+    )
+
+    assert ledger.audience == "traders"
+    assert ledger.output_format == "decision frame"
+    assert ledger.decision_gate == "needs_more_info"
+    assert any("commodity offer is executable" in item for item in ledger.latent_intent_hypotheses)
+    assert any("Physical commodity offers" in item for item in ledger.evidence_contract)
+    assert any("product spec" in item.lower() for item in ledger.verification_conditions)

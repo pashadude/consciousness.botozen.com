@@ -408,15 +408,18 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     lower = text.lower()
     if any(token in lower for token in ("arb", "arbitrage", "ho/rb", "rbob", "ulsd", "crack")):
         add_unique(ledger.latent_intent_hypotheses, "Check whether a physical or relative-value arbitrage exists.")
-    if any(token in lower for token in ("turkey", "sanction", "legal", "counterparty", "cheating")):
-        add_unique(ledger.latent_intent_hypotheses, "Check legal, sanctions, route, or counterparty risk before any trader decision.")
-    if any(token in lower for token in ("spread", "brent", "wti", "basis", "risk")):
+    if any(token in lower for token in ("turkey", "iraq", "umm qasr", "sanction", "legal", "counterparty", "cheating")):
+        add_unique(ledger.latent_intent_hypotheses, "Check legal, sanctions, port, route, payment, title, and counterparty risk before any trader decision.")
+    if any(token in lower for token in ("sulfur", "sulphur", "fob", "ton", "tonne", "tonns", "mt", "offer")):
+        add_unique(ledger.latent_intent_hypotheses, "Reconstruct whether the commodity offer is executable: specification, quantity, origin, Incoterms, price, logistics, payment, counterparty, and resale hedge.")
+    if any(token in lower for token in ("spread", "brent", "wti", "basis", "risk", "fob", "offer")):
         add_unique(ledger.latent_intent_hypotheses, "Estimate basis, market, liquidity, and falsification risk for the spread or thesis.")
 
     for item in (
         "IBKR may be used for futures history and market data only; do not place orders or expose broker execution.",
         "Yahoo Finance may be used only as a proxy/reference source and must carry calibration assumptions.",
         "Commodity feeds must record freshness, entitlement, units, transform, confidence, and lookahead guard.",
+        "Physical commodity offers must verify product specification, quantity tolerance, Incoterms, load port, laycan, counterparty identity, title chain, payment terms, sanctions exposure, freight, insurance, inspection, and resale path.",
     ):
         add_unique(ledger.evidence_contract, item)
 
@@ -425,6 +428,7 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
         "Include legal, logistics, sanctions, market, basis, and counterparty risk flags when relevant.",
         "Return a decision frame for the trader, not a buy/sell recommendation.",
         "Include falsification triggers and missing data before marking the frame ready.",
+        "For physical offers, do not mark go/no-go ready until product spec, documents, counterparty, payment, logistics, and market exit are verified.",
     ):
         add_unique(ledger.verification_conditions, item)
 
@@ -437,6 +441,7 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     for item in (
         "Output includes interpreted thesis, missing information, risk ledger, assumptions, verification checklist, and falsification triggers.",
         "Output is a proof-carrying decision frame that the trader can inspect and explain.",
+        "Output separates immediate answer, required verification, hidden risks, economics, logistics, and go/no-go gate.",
     ):
         add_unique(ledger.success_criteria, item)
 
@@ -456,6 +461,21 @@ def looks_like_trader_query(text: str) -> bool:
         "bitumen",
         "oil",
         "refined",
+        "sulfur",
+        "sulphur",
+        "fertilizer",
+        "fob",
+        "cfr",
+        "cif",
+        "incoterm",
+        "umm qasr",
+        "iraq",
+        "mt",
+        "ton",
+        "tonne",
+        "tonns",
+        "cargo",
+        "offer",
         "counterparty",
         "sanction",
         "turkey",
