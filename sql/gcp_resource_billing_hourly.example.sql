@@ -2,7 +2,11 @@
 --
 -- Replace:
 --   YOUR_BILLING_PROJECT.YOUR_BILLING_DATASET.gcp_billing_export_resource_v1_*
--- with your actual detailed Cloud Billing export table pattern.
+-- with your actual Cloud Billing export table pattern. Prefer the detailed
+-- resource export (`gcp_billing_export_resource_v1_*`) when available. The
+-- standard export (`gcp_billing_export_v1_*`) is still useful for all-resource
+-- service/region cost, and `mutual-spec-telemetry install-views` can discover
+-- either pattern.
 --
 -- This is intentionally not compute-only. Every billable service can feed the
 -- routing criteria vector. Compute resources get the strongest kWh proxy;

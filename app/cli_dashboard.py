@@ -97,6 +97,13 @@ def render_text_section(text: str, *, color: bool) -> str:
 
 def design_status(env: Mapping[str, str]) -> list[StatusItem]:
     telemetry_enabled = parse_bool(env.get("RESOURCE_REGION_DOMINATION_ENABLED"), False)
+    live_collectors_enabled = (
+        telemetry_enabled
+        and parse_bool(env.get("RESOURCE_TELEMETRY_COLLECTORS_ENABLED"), False)
+        and configured_value(env.get("GOOGLE_CLOUD_PROJECT"))
+        and configured_value(env.get("TELEMETRY_DATASET_ID"))
+        and configured_value(env.get("GCP_ASSET_CHANGES_SUBSCRIPTION"))
+    )
     return [
         StatusItem(
             "Mutual Specification Game ledger",
@@ -131,12 +138,12 @@ def design_status(env: Mapping[str, str]) -> list[StatusItem]:
         StatusItem(
             "Resource-region domination telemetry",
             "green" if telemetry_enabled else "red",
-            "future BigQuery criteria layer",
+            "BigQuery criteria layer for model-region routing",
         ),
         StatusItem(
             "Live resource telemetry collectors",
-            "red",
-            "not implemented; SQL/config skeleton only",
+            "green" if live_collectors_enabled else "red",
+            "mutual-spec-telemetry CLI for Asset, Monitoring, Billing, and power proxies",
         ),
     ]
 

@@ -92,6 +92,7 @@ flowchart LR
 │   ├── workflow.py           # ADK 2.x graph workflow and MCP tool wiring
 │   ├── spec_state.py         # Serializable session.state ledger schema
 │   ├── formalization.py      # Problem/question/answer task formalization checks
+│   ├── telemetry/            # Explicit GCP resource-region collectors
 │   ├── router.py             # Python-side model routing policy
 │   └── verifiers.py          # Quality, hallucination, trajectory, and safety checks
 ├── deploy/
@@ -151,6 +152,12 @@ Run the basic terminal dashboard:
 
 ```bash
 uv run mutual-spec-dashboard --text "look at HO/RB arb and give me risk on this spread"
+```
+
+Inspect resource-region telemetry configuration without calling Google Cloud:
+
+```bash
+uv run mutual-spec-telemetry status
 ```
 
 For deterministic plain output without ANSI color:
@@ -224,7 +231,7 @@ Latest local verification:
 
 ```text
 uv run pytest
-# 12 passed
+# expected: all tests pass
 
 .venv/bin/ruff check .
 # All checks passed
@@ -344,11 +351,19 @@ BQ_ANALYTICS_DATASET_ID=adk_agent_analytics
 BQ_ANALYTICS_GCS_BUCKET=your-globally-unique-analytics-bucket
 ARTIFACTS_GCS_BUCKET=your-globally-unique-artifacts-bucket
 
-RESOURCE_REGION_DOMINATION_ENABLED=false
+RESOURCE_REGION_DOMINATION_ENABLED=true
+RESOURCE_TELEMETRY_COLLECTORS_ENABLED=true
 TELEMETRY_DATASET_ID=telemetry
-GCP_ASSET_CHANGES_TOPIC=gcp-asset-changes
+TELEMETRY_LOCATION=US
+GCP_ASSET_CHANGES_TOPIC=gcp-all-resource-changes
+GCP_ASSET_CHANGES_SUBSCRIPTION=gcp-all-resource-changes-sub
+GCP_ASSET_EVENTS_TABLE=gcp_asset_events
+GCP_COMPUTE_METRICS_TABLE=gcp_compute_metrics
+POWER_PRICES_TABLE=region_power_prices
+GCP_RESOURCE_BILLING_VIEW=gcp_resource_billing_hourly
+RESOURCE_REGION_CRITERIA_VIEW=resource_region_criteria_by_hour
 REGION_POWER_MAP_PATH=config/region_power_map.example.yaml
-POWER_PRICE_SOURCE=manual
+POWER_PRICE_SOURCE=static_region_power_map
 # GRIDSTATUS_API_KEY=your-gridstatus-key
 # EIA_API_KEY=your-eia-key
 
@@ -362,7 +377,7 @@ MUTUAL_SPEC_VERIFIER_MODEL=gemini-3.5-flash
 
 ### Turn On Checklist
 
-Do these in order. The first group is required for the current multimodal ADK agent; the second group is for deployment and observability; the third group is for the future all-resource region domination layer.
+Do these in order. The first group is required for the current multimodal ADK agent; the second group is for deployment and observability; the third group is for the all-resource region domination telemetry collectors.
 
 1. Create or select the Google Cloud project that has the grant attached.
 2. Confirm billing/grant credits are linked to that project.
@@ -384,7 +399,7 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | Cloud Build API | `cloudbuild.googleapis.com` | Builds deployment containers when needed. |
 | Artifact Registry API | `artifactregistry.googleapis.com` | Stores deployment images/artifacts. |
 
-5. Enable all-resource region domination telemetry APIs only when you are ready to build that layer:
+5. Enable all-resource region domination telemetry APIs when you want live collector runs:
 
 | Console API name | API ID | Why this repo will need it |
 | --- | --- | --- |
@@ -403,7 +418,7 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | ADK artifacts | `your-project-id-adk-artifacts` | `ARTIFACTS_GCS_BUCKET` |
 | BigQuery analytics spill/log payloads | `your-project-id-adk-analytics` | `BQ_ANALYTICS_GCS_BUCKET` |
 
-7. Create BigQuery datasets for agent analytics and future telemetry:
+7. Create BigQuery datasets for agent analytics and telemetry:
 
 | Dataset ID | `.env` variable | Purpose |
 | --- | --- | --- |
@@ -411,13 +426,41 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | `telemetry` | `TELEMETRY_DATASET_ID` | Billing export, power prices, and resource-region criteria views. |
 
 8. Turn on Cloud Billing export to BigQuery for cost truth. In `Billing -> Billing export -> BigQuery export`, enable `Detailed usage cost data` and `Pricing data` into the telemetry BigQuery dataset. Google notes detailed export includes resource-level cost data, and pricing export writes SKU pricing data. [17]
-9. Create one Model Armor template in the same region:
+9. Create the all-resource Cloud Asset Inventory feed and subscription:
+
+```bash
+gcloud pubsub topics create gcp-all-resource-changes \
+  --project zenpulsar
+
+gcloud pubsub subscriptions create gcp-all-resource-changes-sub \
+  --topic=gcp-all-resource-changes \
+  --project=zenpulsar
+
+gcloud asset feeds create all-resource-feed \
+  --project=zenpulsar \
+  --pubsub-topic=projects/zenpulsar/topics/gcp-all-resource-changes \
+  --asset-types='.*' \
+  --content-type=resource
+```
+
+10. Initialize local collector tables and views after `.env` points at the project:
+
+```bash
+uv run mutual-spec-telemetry init-tables
+uv run mutual-spec-telemetry pull-assets --limit 25
+uv run mutual-spec-telemetry seed-power-prices --hours 24
+uv run mutual-spec-telemetry poll-monitoring --minutes 15
+uv run mutual-spec-telemetry install-views
+```
+
+11. If `pull-assets` shows a billing table named `gcp_billing_export_v1_*`, the standard billing export is alive. If you need per-resource attribution, confirm that a `gcp_billing_export_resource_v1_*` table also appears after enabling detailed export.
+12. Create one Model Armor template in the same region:
 
 | Template ID | `.env` variable |
 | --- | --- |
 | `default-agent-policy` | `MODEL_ARMOR_TEMPLATE_ID` |
 
-10. Set up local Google authentication for ADK/Vertex AI:
+13. Set up local Google authentication for ADK/Vertex AI:
 
 ```bash
 gcloud auth login
@@ -427,7 +470,7 @@ gcloud config set project "$GOOGLE_CLOUD_PROJECT"
 
 ADK's Vertex AI auth path uses `GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, and Google documents `gcloud auth application-default login` as part of that setup. [18]
 
-11. Install and verify the Google Agent Development Kit in this repo. This project already declares `google-adk` in `pyproject.toml`, so use `uv` instead of a global pip install:
+14. Install and verify the Google Agent Development Kit in this repo. This project already declares `google-adk` in `pyproject.toml`, so use `uv` instead of a global pip install:
 
 ```bash
 uv sync --extra eval
@@ -436,7 +479,7 @@ uv sync --extra eval
 
 Google's ADK Python quickstart documents `google-adk`, `adk run`, and `adk web`; for this repo use `uv run adk web app` from the repository root. [19]
 
-12. Set up Agents CLI only if you want Google's coding-agent workflow for create/eval/deploy:
+15. Set up Agents CLI only if you want Google's coding-agent workflow for create/eval/deploy:
 
 ```bash
 uvx google-agents-cli setup
@@ -537,13 +580,40 @@ Candidate `A` dominates candidate `B` when `A` satisfies the hard constraints, i
 
 All billable resources contribute through `all_resource_cost`. Compute, serverless compute, AI platform, GPU, and TPU workloads also contribute through `compute_electricity_spread_stress` because they have the strongest usage-to-kWh proxy. Storage, networking, BigQuery, and managed services stay in the criteria vector through billing cost, region, carbon context, and confidence penalties until stronger energy coefficients exist.
 
-The skeleton files are:
+The collector and skeleton files are:
 
 - [config/region_power_map.example.yaml](config/region_power_map.example.yaml): example Google region to power-market proxy map.
 - [sql/gcp_resource_billing_hourly.example.sql](sql/gcp_resource_billing_hourly.example.sql): all-resource billing export normalization view.
 - [sql/resource_region_criteria_view.example.sql](sql/resource_region_criteria_view.example.sql): joined resource-region criteria view for multicriteria domination.
+- [app/telemetry/asset_consumer.py](app/telemetry/asset_consumer.py): Cloud Asset Inventory Pub/Sub pull consumer.
+- [app/telemetry/monitoring_poller.py](app/telemetry/monitoring_poller.py): Cloud Monitoring poller for Compute Engine CPU metrics.
+- [app/telemetry/power_prices.py](app/telemetry/power_prices.py): static regional electricity proxy bootstrap.
+- [app/telemetry/domination.py](app/telemetry/domination.py): Pareto/non-dominated model-region routing primitives.
 
-This is not live in the ADK runtime yet and should not trigger deployment, trading, settlement, or execution. Use it as a future scorer/judge feature for decisions like:
+The live collectors are explicit CLI operations and are not called by normal
+`adk web`. Run them manually or from Cloud Scheduler/Cloud Run Jobs after the
+Google-side resources exist:
+
+```bash
+uv run mutual-spec-telemetry init-tables
+uv run mutual-spec-telemetry pull-assets --limit 25
+uv run mutual-spec-telemetry poll-monitoring --minutes 15
+uv run mutual-spec-telemetry seed-power-prices --hours 24
+uv run mutual-spec-telemetry install-views
+```
+
+If Billing export created `gcp_billing_export_v1_*` first, the view installer can
+use it for all-resource service/region cost. If you later enable detailed
+resource export and `gcp_billing_export_resource_v1_*` appears, the installer
+will prefer the detailed table pattern. You can override discovery explicitly:
+
+```bash
+uv run mutual-spec-telemetry install-views \
+  --billing-table-pattern 'zenpulsar.telemetry.gcp_billing_export_v1_*'
+```
+
+This layer should not trigger deployment, trading, settlement, or execution. Use
+it as a scorer/judge feature for decisions like:
 
 ```text
 selected_model = gemini-3.5-flash

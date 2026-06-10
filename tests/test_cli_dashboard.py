@@ -87,6 +87,23 @@ def test_dashboard_requires_opoint_key_for_opoint_mcp() -> None:
     assert "ON  MCP research tools" in output_with_key
 
 
+def test_dashboard_marks_live_telemetry_collectors_when_configured() -> None:
+    output = render_dashboard(
+        "route model and region",
+        env={
+            "GOOGLE_CLOUD_PROJECT": "zenpulsar",
+            "RESOURCE_REGION_DOMINATION_ENABLED": "true",
+            "RESOURCE_TELEMETRY_COLLECTORS_ENABLED": "true",
+            "TELEMETRY_DATASET_ID": "telemetry",
+            "GCP_ASSET_CHANGES_SUBSCRIPTION": "gcp-all-resource-changes-sub",
+        },
+        color=False,
+    )
+
+    assert "OK  Resource-region domination telemetry" in output
+    assert "OK  Live resource telemetry collectors" in output
+
+
 def test_estimate_spend_uses_env_coefficients() -> None:
     spend = estimate_spend(
         "abcd",
