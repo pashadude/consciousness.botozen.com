@@ -13,11 +13,18 @@ from vertexai import agent_engines
 from app.agent_runtime_app import agent_runtime
 
 DEFAULT_REQUIREMENTS = [
+    "fastapi>=0.136.0,<1.0.0",
     "google-adk>=2.0.0,<3.0.0",
     "google-cloud-aiplatform[agent-engines,evaluation]>=1.150.0",
+    "google-cloud-bigquery>=3.30.0,<4.0.0",
     "google-cloud-logging>=3.12.0,<4.0.0",
+    "google-cloud-monitoring>=2.27.0,<3.0.0",
+    "google-cloud-pubsub>=2.27.0,<3.0.0",
+    "python-multipart>=0.0.20,<1.0.0",
     "python-dotenv>=1.0.1,<2.0.0",
     "pydantic>=2.10.0,<3.0.0",
+    "PyYAML>=6.0.2,<7.0.0",
+    "uvicorn>=0.32.0,<1.0.0",
 ]
 
 

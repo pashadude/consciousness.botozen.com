@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-zenpulsar}}"
+REGION="${REGION:-${GOOGLE_CLOUD_LOCATION:-us-central1}}"
+AR_LOCATION="${AR_LOCATION:-${REGION}}"
+AR_REPOSITORY="${AR_REPOSITORY:-mutual-spec}"
+IMAGE_NAME="${IMAGE_NAME:-mutual-spec-agent}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_URI="${IMAGE_URI:-${AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}}"
+SERVICE_NAME="${CONSOLE_SERVICE_NAME:-mutual-spec-console}"
+CONSOLE_RUNTIME_SA="${CONSOLE_RUNTIME_SA:-${CONSOLE_RUNTIME_SERVICE_ACCOUNT:-console-runtime@${PROJECT_ID}.iam.gserviceaccount.com}}"
+
+TELEMETRY_DATASET_ID="${TELEMETRY_DATASET_ID:-telemetry}"
+TELEMETRY_LOCATION="${TELEMETRY_LOCATION:-US}"
+GCP_ASSET_CHANGES_SUBSCRIPTION="${GCP_ASSET_CHANGES_SUBSCRIPTION:-gcp-all-resource-changes-sub}"
+CONSOLE_UPLOAD_DIR="${CONSOLE_UPLOAD_DIR:-/tmp/mutual-spec-console/uploads}"
+CONSOLE_ROUTE_REGIONS="${CONSOLE_ROUTE_REGIONS:-us-central1,us-south1,us-east4}"
+CONSOLE_MODEL_ZOO="${CONSOLE_MODEL_ZOO:-gemini-3.5-flash,gemini-3.5-flash-strong}"
+
+gcloud run deploy "${SERVICE_NAME}" \
+  --image="${IMAGE_URI}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --service-account="${CONSOLE_RUNTIME_SA}" \
+  --command="mutual-spec-console" \
+  --port=8080 \
+  --cpu=1 \
+  --memory=1Gi \
+  --min-instances=0 \
+  --max-instances=3 \
+  --allow-unauthenticated \
+  --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},GOOGLE_GENAI_USE_VERTEXAI=true,RESOURCE_REGION_DOMINATION_ENABLED=true,RESOURCE_TELEMETRY_COLLECTORS_ENABLED=true,TELEMETRY_DATASET_ID=${TELEMETRY_DATASET_ID},TELEMETRY_LOCATION=${TELEMETRY_LOCATION},GCP_ASSET_CHANGES_SUBSCRIPTION=${GCP_ASSET_CHANGES_SUBSCRIPTION},CONSOLE_UPLOAD_DIR=${CONSOLE_UPLOAD_DIR},CONSOLE_ROUTE_REGIONS=${CONSOLE_ROUTE_REGIONS},CONSOLE_MODEL_ZOO=${CONSOLE_MODEL_ZOO},MULTIMODAL_RETRIEVAL_ENABLED=true" \
+  --quiet
+
+echo "Console service deployed: ${SERVICE_NAME}"

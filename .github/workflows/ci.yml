@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.22"
+
+      - name: Install dependencies
+        run: uv sync --extra eval
+
+      - name: Ruff
+        run: uv run ruff check .
+
+      - name: Pytest
+        run: uv run pytest
+
+      - name: ADK deterministic eval
+        env:
+          MCP_RESEARCH_COMMAND: ""
+          MCP_RESEARCH_URL: ""
+          OPOINT_API_KEY: ""
+          BQ_ANALYTICS_ENABLED: "false"
+          GOOGLE_GENAI_USE_VERTEXAI: "false"
+          MULTIMODAL_RETRIEVAL_ENABLED: "false"
+          ASYNC_JOB_ENABLED: "false"
+        run: >
+          uv run adk eval app
+          tests/eval/evalsets/msg_mvp.evalset.json
+          --config_file_path tests/eval/eval_config.json
+          --print_detailed_results
+
+      - name: Build telemetry container
+        run: docker build -t mutual-spec-agent:test .

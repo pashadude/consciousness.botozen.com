@@ -1,0 +1,92 @@
+name: Deploy Telemetry Jobs
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      REGION: ${{ vars.GCP_REGION }}
+      AR_LOCATION: ${{ vars.GCP_ARTIFACT_REGION }}
+      AR_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
+      WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+      TELEMETRY_RUNTIME_SERVICE_ACCOUNT: ${{ vars.TELEMETRY_RUNTIME_SERVICE_ACCOUNT }}
+      TELEMETRY_SCHEDULER_SERVICE_ACCOUNT: ${{ vars.TELEMETRY_SCHEDULER_SERVICE_ACCOUNT }}
+      CONSOLE_RUNTIME_SERVICE_ACCOUNT: ${{ vars.CONSOLE_RUNTIME_SERVICE_ACCOUNT }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Normalize deploy env
+        run: |
+          PROJECT_ID="${PROJECT_ID:-zenpulsar}"
+          REGION="${REGION:-us-central1}"
+          AR_LOCATION="${AR_LOCATION:-${REGION}}"
+          AR_REPOSITORY="${AR_REPOSITORY:-mutual-spec}"
+          IMAGE_TAG="${GITHUB_SHA}"
+          IMAGE_URI="${AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/mutual-spec-agent:${IMAGE_TAG}"
+          echo "PROJECT_ID=${PROJECT_ID}" >> "${GITHUB_ENV}"
+          echo "REGION=${REGION}" >> "${GITHUB_ENV}"
+          echo "AR_LOCATION=${AR_LOCATION}" >> "${GITHUB_ENV}"
+          echo "AR_REPOSITORY=${AR_REPOSITORY}" >> "${GITHUB_ENV}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "${GITHUB_ENV}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> "${GITHUB_ENV}"
+          echo "GOOGLE_CLOUD_PROJECT=${PROJECT_ID}" >> "${GITHUB_ENV}"
+          echo "GOOGLE_CLOUD_LOCATION=${REGION}" >> "${GITHUB_ENV}"
+          echo "TELEMETRY_DATASET_ID=telemetry" >> "${GITHUB_ENV}"
+          echo "TELEMETRY_LOCATION=US" >> "${GITHUB_ENV}"
+          echo "GCP_ASSET_CHANGES_TOPIC=gcp-all-resource-changes" >> "${GITHUB_ENV}"
+          echo "GCP_ASSET_CHANGES_SUBSCRIPTION=gcp-all-resource-changes-sub" >> "${GITHUB_ENV}"
+          echo "POWER_PRICE_SOURCE=static_region_power_map" >> "${GITHUB_ENV}"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Artifact Registry Docker auth
+        run: gcloud auth configure-docker "${AR_LOCATION}-docker.pkg.dev" --quiet
+
+      - name: Build image
+        run: docker build -t "${IMAGE_URI}" .
+
+      - name: Push image
+        run: docker push "${IMAGE_URI}"
+
+      - name: Deploy Cloud Run Jobs
+        run: bash deploy/cloud-run/deploy_telemetry_jobs.sh
+
+      - name: Deploy Console Service
+        run: bash deploy/cloud-run/deploy_console_service.sh
+
+      - name: Configure Cloud Scheduler
+        run: bash deploy/cloud-run/create_telemetry_schedules.sh
+
+      - name: Initialize telemetry tables
+        run: >
+          gcloud run jobs execute mutual-spec-telemetry-init-tables
+          --region="${REGION}"
+          --project="${PROJECT_ID}"
+          --wait
+
+      - name: Install telemetry views
+        run: >
+          gcloud run jobs execute mutual-spec-telemetry-install-views
+          --region="${REGION}"
+          --project="${PROJECT_ID}"
+          --wait

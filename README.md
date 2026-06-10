@@ -86,9 +86,12 @@ flowchart LR
 
 ```text
 .
+├── .github/
+│   └── workflows/            # CI and telemetry Cloud Run Jobs deployment
 ├── app/
 │   ├── agent.py              # ADK app entrypoint and BigQuery analytics hook
 │   ├── agent_runtime_app.py  # Agent Runtime wrapper
+│   ├── console.py            # Cloud Run-ready operator console frontend
 │   ├── workflow.py           # ADK 2.x graph workflow and MCP tool wiring
 │   ├── spec_state.py         # Serializable session.state ledger schema
 │   ├── formalization.py      # Problem/question/answer task formalization checks
@@ -96,6 +99,7 @@ flowchart LR
 │   ├── router.py             # Python-side model routing policy
 │   └── verifiers.py          # Quality, hallucination, trajectory, and safety checks
 ├── deploy/
+│   ├── cloud-run/            # Telemetry Cloud Run Job and Scheduler scripts
 │   └── deploy_runtime.py     # Agent Runtime and optional Cloud Run deployment
 ├── config/
 │   └── region_power_map.example.yaml
@@ -113,6 +117,7 @@ flowchart LR
 │       ├── metrics.py        # Custom ADK eval metrics
 │       └── evalsets/msg_mvp.evalset.json
 ├── DESIGN_SPEC.md
+├── Dockerfile                # Telemetry collector and console container
 ├── agents-cli-manifest.yaml
 ├── pyproject.toml
 └── README.md
@@ -159,6 +164,18 @@ Inspect resource-region telemetry configuration without calling Google Cloud:
 ```bash
 uv run mutual-spec-telemetry status
 ```
+
+Run the operator console frontend:
+
+```bash
+uv run mutual-spec-console
+```
+
+Then open `http://localhost:8080`. The console accepts a trader/user query plus
+optional image, audio, PDF, or text artifacts. Browser audio capture attaches a
+speech artifact, and supported browsers can also place speech text into the
+query field. Uploaded binaries are stored outside session state; the ledger only
+keeps metadata artifact references.
 
 For deterministic plain output without ANSI color:
 
@@ -682,6 +699,98 @@ uv run python deploy/deploy_runtime.py \
   --region "$GOOGLE_CLOUD_LOCATION"
 ```
 
+### Console and Telemetry Cloud Run
+
+The resource-region telemetry collectors are batch commands, so they run as
+Cloud Run Jobs rather than a long-lived web service. Google documents Cloud Run
+Jobs for task-to-completion workloads, and Cloud Scheduler can execute a job by
+calling the Cloud Run Jobs `:run` endpoint. [21] [22] The operator console is a
+separate Cloud Run service from the same container image.
+
+One-time Google Cloud setup:
+
+```bash
+export PROJECT_ID=zenpulsar
+export REGION=us-central1
+export AR_LOCATION=us-central1
+export AR_REPOSITORY=mutual-spec
+
+deploy/cloud-run/setup_telemetry_cloud.sh
+```
+
+The setup script creates:
+
+- Artifact Registry Docker repository.
+- `telemetry-collector` runtime service account.
+- `telemetry-scheduler` service account for Cloud Scheduler.
+- `console-runtime` service account for the frontend.
+- `github-deployer` service account for GitHub Actions.
+- GitHub Workload Identity Federation for `pashadude/consciousness.botozen.com` on `main`.
+
+It prints the GitHub repository variables to add under
+`GitHub -> Settings -> Secrets and variables -> Actions -> Variables`:
+
+```text
+GCP_PROJECT_ID
+GCP_REGION
+GCP_ARTIFACT_REGION
+GCP_ARTIFACT_REPOSITORY
+GCP_WORKLOAD_IDENTITY_PROVIDER
+GCP_DEPLOYER_SERVICE_ACCOUNT
+TELEMETRY_RUNTIME_SERVICE_ACCOUNT
+TELEMETRY_SCHEDULER_SERVICE_ACCOUNT
+CONSOLE_RUNTIME_SERVICE_ACCOUNT
+```
+
+No Google service-account JSON key is required. Google recommends Workload
+Identity Federation for deployment pipelines, and GitHub Actions can obtain an
+OIDC token that Google exchanges for short-lived credentials. [23]
+
+Manual deploy from this machine:
+
+```bash
+export PROJECT_ID=zenpulsar
+export REGION=us-central1
+export IMAGE_URI=us-central1-docker.pkg.dev/zenpulsar/mutual-spec/mutual-spec-agent:manual
+
+gcloud auth configure-docker us-central1-docker.pkg.dev
+docker build -t "$IMAGE_URI" .
+docker push "$IMAGE_URI"
+
+deploy/cloud-run/deploy_telemetry_jobs.sh
+deploy/cloud-run/deploy_console_service.sh
+deploy/cloud-run/create_telemetry_schedules.sh
+
+gcloud run jobs execute mutual-spec-telemetry-init-tables \
+  --region="$REGION" \
+  --project="$PROJECT_ID" \
+  --wait
+```
+
+The GitHub workflow `.github/workflows/deploy-telemetry.yml` does the same on
+pushes to `main`: authenticate to Google Cloud, build the Docker image, push it
+to Artifact Registry, deploy/update the Cloud Run Jobs, deploy the console
+service, configure schedules, and run the table/view initialization jobs. The workflow uses
+`google-github-actions/auth` and `google-github-actions/setup-gcloud`; the
+`setup-gcloud` action documentation notes that it configures the Cloud SDK and
+uses the auth action credentials. [24]
+
+The console service is named `mutual-spec-console` by default. It exposes:
+
+- `/`: operator console UI.
+- `/spec`: multipart form endpoint for query plus image/audio/PDF/text uploads.
+- `/api/spec`: JSON endpoint with ledger, route decision, and frontier.
+- `/health`: health check.
+
+Scheduled jobs:
+
+| Cloud Scheduler job | Cloud Run Job | Schedule |
+| --- | --- | --- |
+| `mutual-spec-telemetry-pull-assets-every-5m` | `mutual-spec-telemetry-pull-assets` | Every 5 minutes |
+| `mutual-spec-telemetry-poll-monitoring-every-15m` | `mutual-spec-telemetry-poll-monitoring` | Every 15 minutes |
+| `mutual-spec-telemetry-seed-power-prices-hourly` | `mutual-spec-telemetry-seed-power-prices` | Hourly |
+| `mutual-spec-telemetry-install-views-daily` | `mutual-spec-telemetry-install-views` | Daily |
+
 ## Observability
 
 The app supports optional BigQuery Agent Analytics through `app/agent.py`:
@@ -749,3 +858,7 @@ See [DESIGN_SPEC.md](DESIGN_SPEC.md) for the implementation contract, workflow r
 18. [ADK model authentication quickstart](https://google.github.io/adk-docs/get-started/quickstart/)
 19. [ADK Python quickstart](https://adk.dev/get-started/python/)
 20. [Google Agents CLI](https://github.com/google/agents-cli)
+21. [Create Cloud Run jobs](https://docs.cloud.google.com/run/docs/create-jobs)
+22. [Execute Cloud Run jobs on a schedule](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule)
+23. [Workload Identity Federation with deployment pipelines](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines)
+24. [google-github-actions/setup-gcloud](https://github.com/google-github-actions/setup-gcloud)

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-zenpulsar}}"
+REGION="${REGION:-${GOOGLE_CLOUD_LOCATION:-us-central1}}"
+AR_LOCATION="${AR_LOCATION:-${REGION}}"
+AR_REPOSITORY="${AR_REPOSITORY:-mutual-spec}"
+IMAGE_NAME="${IMAGE_NAME:-mutual-spec-agent}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_URI="${IMAGE_URI:-${AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}}"
+JOB_PREFIX="${JOB_PREFIX:-mutual-spec-telemetry}"
+TELEMETRY_RUNTIME_SA="${TELEMETRY_RUNTIME_SA:-${TELEMETRY_RUNTIME_SERVICE_ACCOUNT:-telemetry-collector@${PROJECT_ID}.iam.gserviceaccount.com}}"
+
+TELEMETRY_DATASET_ID="${TELEMETRY_DATASET_ID:-telemetry}"
+TELEMETRY_LOCATION="${TELEMETRY_LOCATION:-US}"
+GCP_ASSET_CHANGES_TOPIC="${GCP_ASSET_CHANGES_TOPIC:-gcp-all-resource-changes}"
+GCP_ASSET_CHANGES_SUBSCRIPTION="${GCP_ASSET_CHANGES_SUBSCRIPTION:-gcp-all-resource-changes-sub}"
+GCP_ASSET_EVENTS_TABLE="${GCP_ASSET_EVENTS_TABLE:-gcp_asset_events}"
+GCP_COMPUTE_METRICS_TABLE="${GCP_COMPUTE_METRICS_TABLE:-gcp_compute_metrics}"
+POWER_PRICES_TABLE="${POWER_PRICES_TABLE:-region_power_prices}"
+GCP_RESOURCE_BILLING_VIEW="${GCP_RESOURCE_BILLING_VIEW:-gcp_resource_billing_hourly}"
+RESOURCE_REGION_CRITERIA_VIEW="${RESOURCE_REGION_CRITERIA_VIEW:-resource_region_criteria_by_hour}"
+POWER_PRICE_SOURCE="${POWER_PRICE_SOURCE:-static_region_power_map}"
+POWER_PRICE_USD_PER_MWH="${POWER_PRICE_USD_PER_MWH:-80}"
+GCP_MONITORING_WINDOW_MINUTES="${GCP_MONITORING_WINDOW_MINUTES:-15}"
+REGION_POWER_MAP_PATH="${REGION_POWER_MAP_PATH:-config/region_power_map.example.yaml}"
+
+COMMON_ENV="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_LOCATION=${REGION},RESOURCE_REGION_DOMINATION_ENABLED=true,RESOURCE_TELEMETRY_COLLECTORS_ENABLED=true,TELEMETRY_DATASET_ID=${TELEMETRY_DATASET_ID},TELEMETRY_LOCATION=${TELEMETRY_LOCATION},GCP_ASSET_CHANGES_TOPIC=${GCP_ASSET_CHANGES_TOPIC},GCP_ASSET_CHANGES_SUBSCRIPTION=${GCP_ASSET_CHANGES_SUBSCRIPTION},GCP_ASSET_EVENTS_TABLE=${GCP_ASSET_EVENTS_TABLE},GCP_COMPUTE_METRICS_TABLE=${GCP_COMPUTE_METRICS_TABLE},POWER_PRICES_TABLE=${POWER_PRICES_TABLE},GCP_RESOURCE_BILLING_VIEW=${GCP_RESOURCE_BILLING_VIEW},RESOURCE_REGION_CRITERIA_VIEW=${RESOURCE_REGION_CRITERIA_VIEW},POWER_PRICE_SOURCE=${POWER_PRICE_SOURCE},POWER_PRICE_USD_PER_MWH=${POWER_PRICE_USD_PER_MWH},GCP_MONITORING_WINDOW_MINUTES=${GCP_MONITORING_WINDOW_MINUTES},REGION_POWER_MAP_PATH=${REGION_POWER_MAP_PATH}"
+
+deploy_job() {
+  local name="$1"
+  local args="$2"
+  gcloud run jobs deploy "${name}" \
+    --image="${IMAGE_URI}" \
+    --region="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --service-account="${TELEMETRY_RUNTIME_SA}" \
+    --tasks=1 \
+    --parallelism=1 \
+    --max-retries=1 \
+    --task-timeout=900 \
+    --cpu=1 \
+    --memory=512Mi \
+    --set-env-vars="${COMMON_ENV}" \
+    --args="${args}" \
+    --quiet
+}
+
+deploy_job "${JOB_PREFIX}-init-tables" "init-tables"
+deploy_job "${JOB_PREFIX}-pull-assets" "pull-assets,--limit,100"
+deploy_job "${JOB_PREFIX}-poll-monitoring" "poll-monitoring,--minutes,${GCP_MONITORING_WINDOW_MINUTES}"
+deploy_job "${JOB_PREFIX}-seed-power-prices" "seed-power-prices,--hours,24"
+deploy_job "${JOB_PREFIX}-install-views" "install-views"
+
+echo "Cloud Run telemetry jobs deployed with image ${IMAGE_URI}"

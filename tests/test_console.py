@@ -1,0 +1,57 @@
+from fastapi.testclient import TestClient
+
+from app.console import app
+
+
+def test_console_home_renders_multimodal_operator_surface() -> None:
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "Mutual Spec Console" in response.text
+    assert 'accept="image/*,audio/*,application/pdf,text/*"' in response.text
+    assert "Record Speech" in response.text
+    assert "Model-Region Frontier" in response.text
+
+
+def test_console_post_records_image_artifact(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
+    client = TestClient(app)
+
+    response = client.post(
+        "/spec",
+        data={"query": "look at HO/RB arb and give me risk on this spread"},
+        files={"files": ("chart.png", b"fake-png", "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert "chart.png" in response.text
+    assert "image/png" in response.text
+    assert "Artifact Evidence" in response.text
+    assert "artifact:" in response.text
+    assert any(tmp_path.iterdir())
+
+
+def test_console_api_accepts_speech_text_and_audio(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/spec",
+        data={
+            "query": "Brent/WTI bounce?",
+            "speech_text": "make this a decision frame for traders",
+        },
+        files={"files": ("speech.webm", b"fake-audio", "audio/webm")},
+    )
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ledger"]["artifact_refs"][0]["filename"] == "speech.webm"
+    assert payload["ledger"]["artifact_refs"][0]["mime_type"] == "audio/webm"
+    assert "Speech transcript:" in payload["ledger"]["user_request"]
+    assert payload["route_decision"]["mode"] in {"sync", "async"}
+    assert payload["frontier"]
+

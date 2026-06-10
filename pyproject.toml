@@ -5,6 +5,7 @@ description = "ADK Python 2.x Mutual Specification Game prototype"
 authors = [{ name = "Mutual Spec Agent" }]
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "fastapi>=0.136.0,<1.0.0",
     "google-adk>=2.0.0,<3.0.0",
     "google-cloud-aiplatform[agent-engines,evaluation]>=1.150.0",
     "google-cloud-bigquery>=3.30.0,<4.0.0",
@@ -12,16 +13,19 @@ dependencies = [
     "google-cloud-monitoring>=2.27.0,<3.0.0",
     "google-cloud-pubsub>=2.27.0,<3.0.0",
     "opentelemetry-instrumentation-google-genai>=0.1.0,<1.0.0",
+    "python-multipart>=0.0.20,<1.0.0",
     "python-dotenv>=1.0.1,<2.0.0",
     "pydantic>=2.10.0,<3.0.0",
     "mcp>=1.20.0,<2.0.0",
     "PyYAML>=6.0.2,<7.0.0",
+    "uvicorn>=0.32.0,<1.0.0",
 ]
 
 [project.scripts]
 mutual-spec-dashboard = "app.cli_dashboard:main"
 mutual-spec-jobs = "app.jobs_cli:main"
 mutual-spec-telemetry = "app.telemetry.cli:main"
+mutual-spec-console = "app.console:main"
 
 [dependency-groups]
 dev = [
@@ -31,9 +35,7 @@ dev = [
 ]
 
 [project.optional-dependencies]
-cloud-run = [
-    "uvicorn>=0.32.0,<1.0.0",
-]
+cloud-run = []
 eval = [
     "google-adk[eval]>=2.0.0,<3.0.0",
 ]
