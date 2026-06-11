@@ -157,14 +157,14 @@ def load_records(
     total = 0
     batch: list[list[Any]] = []
     for row in rows:
+        if limit is not None and total + len(batch) >= limit:
+            break
         batch.append(row)
         if len(batch) >= batch_size:
             commit_batch(database, table, columns, batch)
             total += len(batch)
             batch.clear()
             report_progress(progress_label, total, progress_every)
-            if limit is not None and total >= limit:
-                return total
     if batch and (limit is None or total < limit):
         if limit is not None:
             batch = batch[: max(0, limit - total)]
