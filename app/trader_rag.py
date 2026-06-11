@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
@@ -292,7 +293,7 @@ def run_trader_rag(
     if provider in {"google_agent_search", "adk_google_search", "google_search_tool"}:
         return planned_google_agent_search(queries, required_evidence, config=config)
     if provider in {"spanner", "spanner_rag", "cloud_spanner"}:
-        return planned_spanner_rag(queries, required_evidence, config=config)
+        return run_spanner_provider(queries, required_evidence, config=config)
     if provider in {"vertex_ai_search", "enterprise_search"}:
         return planned_vertex_ai_search(queries, required_evidence, config=config)
     if provider in {"model", "model_only"}:
@@ -371,7 +372,7 @@ def planned_vertex_ai_search(
     )
 
 
-def planned_spanner_rag(
+def run_spanner_provider(
     queries: list[str],
     required_evidence: list[str],
     *,
@@ -383,23 +384,132 @@ def planned_spanner_rag(
         if config.spanner_configured
         else ""
     )
-    warnings = (
-        [
-            f"Private corpus target: {resource}; retrieval is available after Spanner schema, embeddings, and indexes are loaded."
-        ]
-        if config.spanner_configured
-        else [
+    if not config.spanner_configured:
+        return TraderRagResult(
+            provider="spanner_rag",
+            status="missing_config",
+            queries=queries,
+            required_evidence=required_evidence,
+            warnings=[
             "Spanner RAG needs GOOGLE_CLOUD_PROJECT, SPANNER_RAG_INSTANCE_ID, and SPANNER_RAG_DATABASE_ID.",
             "Run scripts/prepare_spanner_rag_json.py first, then load documents.jsonl/chunks.jsonl into Spanner.",
-        ]
-    )
+            ],
+        )
+    evidence: list[SearchEvidence] = []
+    warnings: list[str] = []
+    per_query_limit = max(1, min(config.max_results, 10))
+    for query in queries[: config.max_queries]:
+        try:
+            evidence.extend(
+                query_spanner_chunks(
+                    query,
+                    config=config,
+                    limit=per_query_limit,
+                )
+            )
+        except Exception as exc:
+            warnings.append(f"Spanner RAG failed for `{query}`: {exc}")
+    deduped = dedupe_evidence(evidence)[: config.max_results]
+    if not deduped and not warnings:
+        warnings.append(f"Private corpus target {resource} returned no matching chunks.")
     return TraderRagResult(
         provider="spanner_rag",
-        status="configured" if config.spanner_configured else "missing_config",
+        status="retrieved" if deduped else "provider_error" if warnings else "empty",
         queries=queries,
         required_evidence=required_evidence,
+        evidence=deduped,
         warnings=warnings,
     )
+
+
+def query_spanner_chunks(
+    query: str,
+    *,
+    config: TraderSourceConfig,
+    limit: int,
+) -> list[SearchEvidence]:
+    table = safe_spanner_identifier(config.spanner_chunks_table or "RagChunks")
+    sql = f"""
+        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
+        FROM {table}
+        WHERE SEARCH(ChunkTokens, @query)
+        LIMIT @limit
+    """
+    from google.cloud import spanner
+
+    database = (
+        spanner.Client(project=config.google_cloud_project)
+        .instance(config.spanner_instance_id)
+        .database(config.spanner_database_id)
+    )
+    with database.snapshot() as snapshot:
+        rows = list(
+            snapshot.execute_sql(
+                sql,
+                params={"query": query, "limit": limit},
+                param_types={
+                    "query": spanner.param_types.STRING,
+                    "limit": spanner.param_types.INT64,
+                },
+            )
+        )
+    evidence: list[SearchEvidence] = []
+    for row in rows:
+        evidence.append(spanner_row_to_evidence(row, query=query, config=config))
+    return evidence
+
+
+def spanner_row_to_evidence(
+    row: Any,
+    *,
+    query: str,
+    config: TraderSourceConfig,
+) -> SearchEvidence:
+    chunk_id, doc_id, source_dataset, chunk_text, published_at, source, commodities, tags = row
+    text = str(chunk_text or "")
+    title = extract_spanner_title(text, source_dataset=str(source_dataset or "spanner_rag"))
+    uri = (
+        "spanner://"
+        f"{config.google_cloud_project}/{config.spanner_instance_id}/"
+        f"{config.spanner_database_id}/{config.spanner_chunks_table or 'RagChunks'}/"
+        f"{doc_id}/{chunk_id}"
+    )
+    context = []
+    if published_at:
+        context.append(f"published={published_at}")
+    if source:
+        context.append(f"source={source}")
+    if commodities:
+        context.append(f"commodities={', '.join(str(item) for item in commodities)}")
+    if tags:
+        context.append(f"tags={', '.join(str(item) for item in tags[:8])}")
+    prefix = "; ".join(context)
+    summary = f"{prefix}\n{text}" if prefix else text
+    return SearchEvidence(
+        evidence_id=f"spanner:{stable_id(uri)}",
+        title=title[:180],
+        url=uri,
+        summary=summary[:500],
+        query=query,
+        source="spanner_rag",
+        confidence="medium",
+    )
+
+
+def extract_spanner_title(text: str, *, source_dataset: str) -> str:
+    for line in text.splitlines()[:6]:
+        if line.lower().startswith("title:"):
+            title = line.split(":", 1)[1].strip()
+            if title:
+                return title
+    clean = " ".join(text.split())
+    return clean[:140] if clean else source_dataset
+
+
+def safe_spanner_identifier(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value):
+        raise ValueError(f"Unsafe Spanner identifier: {value}")
+    return value
 
 
 def model_only_hypothesis(

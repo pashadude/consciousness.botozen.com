@@ -2,6 +2,7 @@ import json
 
 from app.spec_state import SpecLedger, update_ledger_from_user_text
 from app.trader_rag import (
+    SearchEvidence,
     apply_rag_to_ledger,
     load_trader_source_config,
     run_trader_rag,
@@ -89,7 +90,20 @@ def test_google_agent_search_provider_records_workflow_handoff() -> None:
     assert any(source.source_type == "google_agent_search" for source in ledger.evidence_sources)
 
 
-def test_spanner_rag_provider_records_private_corpus_target() -> None:
+def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:
+    def fake_query_spanner_chunks(query, *, config, limit):
+        return [
+            SearchEvidence(
+                evidence_id="spanner:test",
+                title="Umm Qasr sulfur offer trace",
+                url="spanner://zenpulsar/commodity-rag/trader_rag/RagChunks/doc/chunk",
+                summary="Private corpus note on sulfur, FOB, Iraq, and trader verification.",
+                query=query,
+                source="spanner_rag",
+            )
+        ]
+
+    monkeypatch.setattr("app.trader_rag.query_spanner_chunks", fake_query_spanner_chunks)
     ledger = SpecLedger()
     update_ledger_from_user_text(ledger, SULFUR_OFFER)
 
@@ -106,9 +120,10 @@ def test_spanner_rag_provider_records_private_corpus_target() -> None:
     apply_rag_to_ledger(ledger, result)
 
     assert result.provider == "spanner_rag"
-    assert result.status == "configured"
+    assert result.status == "retrieved"
+    assert result.evidence
     assert any(source.source_type == "spanner_rag" for source in ledger.evidence_sources)
-    assert any("Spanner" in warning for warning in result.warnings)
+    assert any("Umm Qasr sulfur offer trace" == item.title for item in ledger.evidence)
 
 
 def test_yaml_source_layer_defaults_can_enable_google_agent_search(tmp_path) -> None:
