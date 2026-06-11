@@ -297,16 +297,15 @@ Uploaded files, PDFs, and images are stored with ADK artifact services. The ledg
 External retrieval is optional and configured through environment variables:
 
 ```bash
-# Local Opoint stdio MCP server
+# Vendored Opoint stdio MCP server
 export OPOINT_API_KEY=your-opoint-api-key
-export MCP_RESEARCH_COMMAND="uv run opoint-mcp"
-export MCP_RESEARCH_CWD=/Users/pauldudko/VSProjects/mcp_opoint
+export MCP_RESEARCH_COMMAND="python -m opoint_mcp.server"
 
 # or streamable HTTP MCP server
 # export MCP_RESEARCH_URL=https://your-mcp-server.example.com/mcp
 ```
 
-When MCP is configured, the workflow routes through `mcp_research_agent`, which is built with ADK's `McpToolset`. ADK supports MCP tools for connecting agents to external tool servers over stdio or remote transports. [6]
+When MCP is configured, the workflow routes through `mcp_research_agent`, which is built with ADK's `McpToolset`. The FastAPI console also supports `TRADER_RAG_PROVIDER=mcp` and calls the MCP server directly for cited trader evidence. ADK supports MCP tools for connecting agents to external tool servers over stdio or remote transports. [6]
 
 ## Trader Source Layer
 
@@ -333,8 +332,7 @@ Source modes:
 # Defaults live here. Env vars override this file.
 export TRADER_SOURCE_LAYER_CONFIG=config/trader_source_layer.yaml
 
-# Default from YAML: ADK workflow path using Google's native google_search tool.
-# No extra env is needed beyond Google auth/project env.
+# Default from YAML: Spanner private commodity corpus.
 
 # Direct console/Cloud Run path: Google Programmable Search / Custom Search JSON API.
 export TRADER_RAG_PROVIDER=google_cse
@@ -346,6 +344,14 @@ export TRADER_RAG_PROVIDER=spanner_rag
 export SPANNER_RAG_INSTANCE_ID=commodity-rag
 export SPANNER_RAG_DATABASE_ID=trader_rag
 
+# Live Opoint news through the vendored MCP server.
+export TRADER_RAG_PROVIDER=mcp
+export OPOINT_API_KEY=your-opoint-api-key
+export MCP_RESEARCH_COMMAND="python -m opoint_mcp.server"
+
+# Joined private corpus plus live Opoint news.
+export TRADER_RAG_PROVIDER=spanner_rag,mcp
+
 # Deterministic local evidence for tests/demos.
 export TRADER_RAG_PROVIDER=fixture
 export TRADER_RAG_FIXTURE_PATH=tests/fixtures/trader_search_results.json
@@ -354,7 +360,8 @@ export TRADER_RAG_FIXTURE_PATH=tests/fixtures/trader_search_results.json
 export TRADER_RAG_PROVIDER=model
 ```
 
-Use `spanner_rag` for your private commodity corpus. Use
+Use `spanner_rag,mcp` when you want the console to join your private commodity
+corpus with live Opoint news. Use `spanner_rag` alone for your private corpus. Use
 `google_agent_search` inside `adk web`/Agent Runtime when you want Google's
 Agent SDK tool path for public web evidence. Use `google_cse` for the FastAPI
 console because it can call the Custom Search JSON API directly and render
@@ -470,13 +477,14 @@ Load strategy:
 Set the app env:
 
 ```bash
-TRADER_RAG_PROVIDER=spanner_rag
+TRADER_RAG_PROVIDER=spanner_rag,mcp
 SPANNER_RAG_INSTANCE_ID=commodity-rag
 SPANNER_RAG_DATABASE_ID=trader_rag
 SPANNER_RAG_DOCUMENTS_TABLE=RagDocuments
 SPANNER_RAG_CHUNKS_TABLE=RagChunks
 SPANNER_RAG_EMBEDDING_MODEL=RagEmbeddingModel
 TRADER_SOURCE_LAYER_CONFIG=config/trader_source_layer.yaml
+MCP_RESEARCH_COMMAND=python -m opoint_mcp.server
 ```
 
 If you later create an Agent Search app/engine as an alternate private corpus,
@@ -630,7 +638,7 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | `google_agent_search` | Vertex AI API plus ADK/Agent Runtime credentials | `GOOGLE_AGENT_SEARCH_ENABLED=true` |
 | `google_cse` | Google Cloud Console -> APIs & Services -> Library -> Custom Search API | `GOOGLE_SEARCH_CX`, `GOOGLE_SEARCH_API_KEY` |
 | `vertex_ai_search` | Optional Vertex AI Search / Agent Builder data store | `VERTEX_AI_SEARCH_DATA_STORE_ID` or `VERTEX_AI_SEARCH_ENGINE_ID` |
-| `mcp` / Opoint | Your local or remote MCP server | `MCP_RESEARCH_COMMAND`/`MCP_RESEARCH_URL`, plus `OPOINT_API_KEY` for Opoint |
+| `mcp` / Opoint | Vendored Opoint MCP server or remote MCP server | `TRADER_RAG_PROVIDER=mcp` or `spanner_rag,mcp`, `MCP_RESEARCH_COMMAND=python -m opoint_mcp.server`, plus `OPOINT_API_KEY` for Opoint |
 
 5. Enable deployment APIs if you want Agent Runtime or Cloud Run:
 
@@ -973,6 +981,18 @@ SPANNER_RAG_DOCUMENTS_TABLE
 SPANNER_RAG_CHUNKS_TABLE
 SPANNER_RAG_EMBEDDING_MODEL
 SPANNER_RAG_GCS_BUCKET
+```
+
+For live Opoint MCP in Cloud Run, store the API key in Secret Manager and point
+the source layer at `spanner_rag,mcp`. The deploy script automatically binds a
+Secret Manager secret named `opoint-api-key` to `OPOINT_API_KEY` when it exists:
+
+```bash
+printf '%s' 'YOUR_OPOINT_API_KEY' | gcloud secrets create opoint-api-key \
+  --project=zenpulsar \
+  --data-file=-
+
+gh variable set TRADER_RAG_PROVIDER --body 'spanner_rag,mcp'
 ```
 
 No Google service-account JSON key is required. Google recommends Workload

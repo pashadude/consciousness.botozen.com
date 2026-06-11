@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import re
+import shlex
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +74,10 @@ class TraderSourceConfig:
     spanner_embedding_model: str | None = None
     vertex_ai_search_data_store_id: str | None = None
     vertex_ai_search_engine_id: str | None = None
+    mcp_research_url: str | None = None
+    mcp_research_command: str | None = None
+    mcp_research_cwd: str | None = None
+    opoint_api_key: str | None = None
     fixture_path: str | None = None
     source_layer_config_path: str | None = None
     google_genai_use_vertexai: bool = False
@@ -111,8 +118,25 @@ def load_trader_source_config(env: Mapping[str, str] | None = None) -> TraderSou
     google_cse_cfg = nested_config(yaml_config, "google_cse")
     spanner_cfg = nested_config(yaml_config, "spanner_rag")
     vertex_cfg = nested_config(yaml_config, "vertex_ai_search")
+    mcp_cfg = nested_config(yaml_config, "mcp")
     fixture_cfg = nested_config(yaml_config, "fixture")
     limits_cfg = nested_config(yaml_config, "limits")
+    opoint_api_key = value_from_env_or_yaml(
+        env,
+        env_name="OPOINT_API_KEY",
+        config=mcp_cfg,
+        value_key="opoint_api_key",
+        env_key="opoint_api_key_env",
+    )
+    mcp_research_command = value_from_env_or_yaml(
+        env,
+        env_name="MCP_RESEARCH_COMMAND",
+        config=mcp_cfg,
+        value_key="opoint_command",
+        env_key="opoint_command_env",
+    )
+    if not mcp_research_command and opoint_api_key:
+        mcp_research_command = "python -m opoint_mcp.server"
     return TraderSourceConfig(
         provider=provider.strip().lower(),
         google_agent_search_enabled=parse_bool(
@@ -197,6 +221,22 @@ def load_trader_source_config(env: Mapping[str, str] | None = None) -> TraderSou
             value_key="search_engine_id",
             env_key="search_engine_id_env",
         ),
+        mcp_research_url=value_from_env_or_yaml(
+            env,
+            env_name="MCP_RESEARCH_URL",
+            config=mcp_cfg,
+            value_key="research_url",
+            env_key="research_url_env",
+        ),
+        mcp_research_command=mcp_research_command,
+        mcp_research_cwd=value_from_env_or_yaml(
+            env,
+            env_name="MCP_RESEARCH_CWD",
+            config=mcp_cfg,
+            value_key="opoint_cwd",
+            env_key="opoint_cwd_env",
+        ),
+        opoint_api_key=opoint_api_key,
         fixture_path=value_from_env_or_yaml(
             env,
             env_name="TRADER_RAG_FIXTURE_PATH",
@@ -290,12 +330,80 @@ def run_trader_rag(
                 "For high-stakes trader decisions, large context/model memory is not enough: cited retrieval evidence is required.",
             ],
         )
+    provider_names = provider_sequence(provider)
+    if len(provider_names) > 1:
+        return run_multi_provider(
+            provider_names,
+            queries,
+            required_evidence,
+            config=config,
+        )
+    return run_single_provider(provider, queries, required_evidence, config=config)
+
+
+def provider_sequence(provider: str) -> list[str]:
+    if provider == "all":
+        return ["spanner_rag", "mcp", "google_agent_search"]
+    parts = [item.strip().lower() for item in re.split(r"[,+]", provider) if item.strip()]
+    return parts or [provider]
+
+
+def run_multi_provider(
+    providers: list[str],
+    queries: list[str],
+    required_evidence: list[str],
+    *,
+    config: TraderSourceConfig,
+) -> TraderRagResult:
+    results = [
+        run_single_provider(provider, queries, required_evidence, config=config)
+        for provider in providers
+    ]
+    evidence = dedupe_evidence(
+        [item for result in results for item in result.evidence]
+    )[: config.max_results]
+    warnings = [
+        f"{result.provider}: {warning}"
+        for result in results
+        for warning in result.warnings
+    ]
+    if evidence:
+        status = "retrieved"
+    elif all(result.status == "missing_config" for result in results):
+        status = "missing_config"
+    elif any(result.status == "provider_error" for result in results):
+        status = "provider_error"
+    elif any(result.status == "configured" for result in results):
+        status = "configured"
+    elif any(result.status == "planned" for result in results):
+        status = "planned"
+    else:
+        status = results[0].status if results else "empty"
+    return TraderRagResult(
+        provider="+".join(result.provider for result in results),
+        status=status,
+        queries=queries,
+        required_evidence=required_evidence,
+        evidence=evidence,
+        warnings=warnings,
+    )
+
+
+def run_single_provider(
+    provider: str,
+    queries: list[str],
+    required_evidence: list[str],
+    *,
+    config: TraderSourceConfig,
+) -> TraderRagResult:
     if provider in {"google_agent_search", "adk_google_search", "google_search_tool"}:
         return planned_google_agent_search(queries, required_evidence, config=config)
     if provider in {"spanner", "spanner_rag", "cloud_spanner"}:
         return run_spanner_provider(queries, required_evidence, config=config)
     if provider in {"vertex_ai_search", "enterprise_search"}:
         return planned_vertex_ai_search(queries, required_evidence, config=config)
+    if provider in {"mcp", "opoint", "opoint_mcp"}:
+        return run_mcp_provider(queries, required_evidence, config=config)
     if provider in {"model", "model_only"}:
         return model_only_hypothesis(queries, required_evidence, config=config)
     if provider == "fixture":
@@ -370,6 +478,273 @@ def planned_vertex_ai_search(
             "Vertex AI Search needs VERTEX_AI_SEARCH_DATA_STORE_ID or VERTEX_AI_SEARCH_ENGINE_ID.",
         ],
     )
+
+
+def run_mcp_provider(
+    queries: list[str],
+    required_evidence: list[str],
+    *,
+    config: TraderSourceConfig,
+) -> TraderRagResult:
+    provider_name = (
+        "opoint_mcp"
+        if (config.mcp_research_command or "").lower().find("opoint") >= 0
+        else "mcp"
+    )
+    if not config.mcp_research_url and not config.mcp_research_command:
+        return TraderRagResult(
+            provider=provider_name,
+            status="missing_config",
+            queries=queries,
+            required_evidence=required_evidence,
+            warnings=[
+                "MCP RAG needs MCP_RESEARCH_URL or MCP_RESEARCH_COMMAND. For vendored Opoint, set OPOINT_API_KEY and use MCP_RESEARCH_COMMAND='python -m opoint_mcp.server'.",
+            ],
+        )
+    if (
+        config.mcp_research_command
+        and "opoint" in config.mcp_research_command.lower()
+        and not config.opoint_api_key
+    ):
+        return TraderRagResult(
+            provider=provider_name,
+            status="missing_config",
+            queries=queries,
+            required_evidence=required_evidence,
+            warnings=["Opoint MCP is configured but OPOINT_API_KEY is missing."],
+        )
+    evidence: list[SearchEvidence] = []
+    warnings: list[str] = []
+    per_query_limit = max(1, min(config.max_results, 20))
+    for query in queries[: config.max_queries]:
+        try:
+            records = run_async_mcp(
+                fetch_mcp_search_records(query, config=config, limit=per_query_limit)
+            )
+        except Exception as exc:
+            warnings.append(f"MCP search failed for `{query}`: {exc}")
+            continue
+        evidence.extend(
+            normalize_mcp_record(record, query=query, index=index)
+            for index, record in enumerate(records, start=1)
+        )
+        if evidence:
+            break
+    deduped = dedupe_evidence(evidence)[: config.max_results]
+    return TraderRagResult(
+        provider=provider_name,
+        status="retrieved" if deduped else "provider_error" if warnings else "empty",
+        queries=queries,
+        required_evidence=required_evidence,
+        evidence=deduped,
+        warnings=warnings or ([] if deduped else ["MCP returned no article evidence."]),
+    )
+
+
+def run_async_mcp(coro: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    if hasattr(coro, "close"):
+        coro.close()
+    raise RuntimeError(
+        "MCP RAG provider was called inside an active event loop; use the ADK MCP tool path for async workflows."
+    )
+
+
+async def fetch_mcp_search_records(
+    query: str,
+    *,
+    config: TraderSourceConfig,
+    limit: int,
+) -> list[Mapping[str, Any]]:
+    from mcp import StdioServerParameters
+    from mcp.client.session import ClientSession
+    from mcp.client.stdio import stdio_client
+    from mcp.client.streamable_http import streamablehttp_client
+
+    if config.mcp_research_url:
+        async with streamablehttp_client(
+            config.mcp_research_url,
+            timeout=config.timeout_seconds,
+            sse_read_timeout=max(config.timeout_seconds, 30),
+        ) as (read_stream, write_stream, _session_id):
+            async with ClientSession(read_stream, write_stream) as session:
+                return await call_mcp_search_tool(
+                    session,
+                    query=query,
+                    limit=limit,
+                    timeout_seconds=config.timeout_seconds,
+                )
+
+    if not config.mcp_research_command:
+        return []
+    parts = shlex.split(config.mcp_research_command)
+    if not parts:
+        return []
+    server_params = StdioServerParameters(
+        command=parts[0],
+        args=parts[1:],
+        cwd=config.mcp_research_cwd,
+    )
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            return await call_mcp_search_tool(
+                session,
+                query=query,
+                limit=limit,
+                timeout_seconds=config.timeout_seconds,
+            )
+
+
+async def call_mcp_search_tool(
+    session: Any,
+    *,
+    query: str,
+    limit: int,
+    timeout_seconds: float,
+) -> list[Mapping[str, Any]]:
+    await session.initialize()
+    tools_result = await session.list_tools()
+    tool_name = choose_mcp_search_tool([tool.name for tool in tools_result.tools])
+    if not tool_name:
+        available = ", ".join(tool.name for tool in tools_result.tools) or "none"
+        raise RuntimeError(f"No MCP search/article tool found. Available tools: {available}.")
+    call_result = await session.call_tool(
+        tool_name,
+        arguments=mcp_search_arguments(tool_name, query=query, limit=limit),
+        read_timeout_seconds=timedelta(seconds=max(timeout_seconds, 1.0)),
+    )
+    if getattr(call_result, "isError", False):
+        raise RuntimeError(extract_mcp_error(call_result))
+    return mcp_call_records(call_result)
+
+
+def choose_mcp_search_tool(tool_names: list[str]) -> str | None:
+    preferred = ["search_site_and_articles", "search_articles", "article_search"]
+    for candidate in preferred:
+        if candidate in tool_names:
+            return candidate
+    for name in tool_names:
+        lowered = name.lower()
+        if lowered == "search_site":
+            continue
+        if "article" in lowered and "search" in lowered:
+            return name
+    for name in tool_names:
+        lowered = name.lower()
+        if "search" in lowered and lowered != "search_site":
+            return name
+    return None
+
+
+def mcp_search_arguments(tool_name: str, *, query: str, limit: int) -> dict[str, Any]:
+    lowered = tool_name.lower()
+    if "article" in lowered or "opoint" in lowered or lowered.startswith("search_"):
+        return {"search_text": query, "num_articles": limit}
+    return {"query": query, "limit": limit}
+
+
+def extract_mcp_error(call_result: Any) -> str:
+    content = getattr(call_result, "content", []) or []
+    texts = [str(getattr(item, "text", "")).strip() for item in content]
+    return "; ".join(text for text in texts if text) or "MCP tool returned an error."
+
+
+def mcp_call_records(call_result: Any) -> list[Mapping[str, Any]]:
+    structured = getattr(call_result, "structuredContent", None)
+    records = records_from_mcp_payload(structured)
+    if records:
+        return records
+    for item in getattr(call_result, "content", []) or []:
+        text = str(getattr(item, "text", "") or "").strip()
+        if not text:
+            continue
+        try:
+            records = records_from_mcp_payload(json.loads(text))
+            if records:
+                return records
+        except json.JSONDecodeError:
+            return [{"title": "MCP search result", "summary": text, "url": "mcp://result"}]
+    return []
+
+
+def records_from_mcp_payload(payload: Any) -> list[Mapping[str, Any]]:
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, Mapping)]
+    if isinstance(payload, Mapping):
+        for key in ("results", "articles", "documents", "items", "data", "result"):
+            nested = payload.get(key)
+            records = records_from_mcp_payload(nested)
+            if records:
+                return records
+        return [payload]
+    return []
+
+
+def normalize_mcp_record(
+    raw: Mapping[str, Any],
+    *,
+    query: str,
+    index: int,
+) -> SearchEvidence:
+    url = clean_mcp_value(
+        raw.get("url")
+        or raw.get("orig_url")
+        or raw.get("link")
+        or raw.get("uri")
+        or raw.get("opoint_url")
+        or raw.get("source_url")
+    )
+    title = clean_mcp_value(
+        raw.get("title") or raw.get("header") or raw.get("name") or raw.get("id_article")
+    ) or f"Opoint article {index}"
+    source = clean_mcp_value(
+        raw.get("source_name")
+        or raw.get("site_name")
+        or raw.get("source")
+        or raw.get("provider")
+    ) or "opoint"
+    published = clean_mcp_value(
+        raw.get("published_date")
+        or raw.get("published_at")
+        or raw.get("date")
+        or raw.get("unix_timestamp")
+    )
+    body = clean_mcp_value(
+        raw.get("summary")
+        or raw.get("snippet")
+        or raw.get("description")
+        or raw.get("text")
+    )
+    context = [f"source={source}"]
+    if published:
+        context.append(f"published={published}")
+    summary = "; ".join(context)
+    if body:
+        summary = f"{summary}\n{body}"
+    uri = url or f"mcp://opoint/{stable_id(title + query)}"
+    return SearchEvidence(
+        evidence_id=f"mcp:{stable_id(uri + title)}",
+        title=title[:180],
+        url=uri,
+        summary=summary[:500],
+        query=query,
+        source="opoint_mcp" if source == "opoint" else source,
+        confidence="medium",
+    )
+
+
+def clean_mcp_value(value: Any) -> str:
+    if value is None:
+        return ""
+    text = " ".join(str(value).split())
+    if text.lower() in {"", "nan", "nat", "none", "null"}:
+        return ""
+    return text
 
 
 def run_spanner_provider(
@@ -724,15 +1099,16 @@ def apply_rag_to_ledger(ledger: SpecLedger, rag: TraderRagResult) -> None:
     for warning in rag.warnings:
         add_unique(ledger.assumptions, f"RAG warning: {warning}")
     for item in rag.evidence:
+        evidence_source_type = source_type_for_provider(item.source)
         add_external_evidence(
             ledger,
-            source_type=source_type,
+            source_type=evidence_source_type,
             title=item.title,
             uri=item.url,
             summary=f"{item.summary} [query: {item.query}]",
-            source_name=rag.provider,
+            source_name=item.source,
             query=item.query,
-            confidence=confidence_for_provider(rag.provider),
+            confidence=confidence_for_provider(item.source),
             used=True,
         )
 
@@ -792,6 +1168,8 @@ def source_type_for_provider(provider: str) -> str:
         return "google_agent_search"
     if provider in {"spanner", "spanner_rag", "cloud_spanner"}:
         return "spanner_rag"
+    if provider in {"mcp", "opoint", "opoint_mcp"}:
+        return "mcp"
     if provider in {"vertex_ai_search", "enterprise_search"}:
         return "vertex_ai_search"
     if provider in {"model", "model_only"}:
@@ -813,6 +1191,8 @@ def confidence_for_provider(provider: str) -> str:
     if provider in {"google_cse", "google", "programmable_search", "google_agent_search", "adk_google_search", "google_search_tool"}:
         return "high"
     if provider in {"spanner", "spanner_rag", "cloud_spanner", "vertex_ai_search", "enterprise_search", "fixture"}:
+        return "medium"
+    if provider in {"mcp", "opoint", "opoint_mcp"}:
         return "medium"
     if provider in {"model", "model_only"}:
         return "low"

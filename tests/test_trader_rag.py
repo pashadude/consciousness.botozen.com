@@ -147,6 +147,110 @@ def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:
     assert any("Umm Qasr sulfur offer trace" == item.title for item in ledger.evidence)
 
 
+def test_mcp_opoint_provider_retrieves_live_source_shape(monkeypatch) -> None:
+    async def fake_fetch_mcp_search_records(query, *, config, limit):
+        return [
+            {
+                "title": "Iraq sulfur export fixture",
+                "url": "https://example.test/iraq-sulfur",
+                "summary": "Opoint article body about sulfur cargoes and Umm Qasr.",
+                "source_name": "Opoint Test Wire",
+                "published_date": "2026-06-10",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.trader_rag.fetch_mcp_search_records",
+        fake_fetch_mcp_search_records,
+    )
+    ledger = SpecLedger()
+    update_ledger_from_user_text(ledger, SULFUR_OFFER)
+
+    result = run_trader_rag(
+        SULFUR_OFFER,
+        env={
+            "TRADER_RAG_PROVIDER": "mcp",
+            "OPOINT_API_KEY": "test-key",
+            "TRADER_RAG_MAX_RESULTS": "2",
+        },
+        search_plan=ledger.search_plan,
+    )
+    apply_rag_to_ledger(ledger, result)
+
+    assert result.provider == "opoint_mcp"
+    assert result.status == "retrieved"
+    assert result.evidence[0].source == "Opoint Test Wire"
+    assert any(item.source_type == "rag" for item in ledger.evidence)
+    assert any("Iraq sulfur export fixture" == item.title for item in ledger.evidence)
+
+
+def test_mcp_opoint_provider_requires_key_for_vendored_server() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(ledger, SULFUR_OFFER)
+
+    result = run_trader_rag(
+        SULFUR_OFFER,
+        env={
+            "TRADER_RAG_PROVIDER": "mcp",
+            "MCP_RESEARCH_COMMAND": "python -m opoint_mcp.server",
+        },
+        search_plan=ledger.search_plan,
+    )
+
+    assert result.provider == "opoint_mcp"
+    assert result.status == "missing_config"
+    assert any("OPOINT_API_KEY" in warning for warning in result.warnings)
+
+
+def test_joined_spanner_and_mcp_provider_merges_evidence(monkeypatch) -> None:
+    def fake_query_spanner_chunks(query, *, config, limit):
+        return [
+            SearchEvidence(
+                evidence_id="spanner:test",
+                title="Private sulfur note",
+                url="spanner://doc/chunk",
+                summary="Internal commodity corpus sulfur note.",
+                query=query,
+                source="spanner_rag",
+            )
+        ]
+
+    async def fake_fetch_mcp_search_records(query, *, config, limit):
+        return [
+            {
+                "title": "External sulfur article",
+                "url": "https://example.test/external-sulfur",
+                "summary": "External news context from Opoint.",
+                "provider": "opoint",
+            }
+        ]
+
+    monkeypatch.setattr("app.trader_rag.query_spanner_chunks", fake_query_spanner_chunks)
+    monkeypatch.setattr(
+        "app.trader_rag.fetch_mcp_search_records",
+        fake_fetch_mcp_search_records,
+    )
+    ledger = SpecLedger()
+    update_ledger_from_user_text(ledger, SULFUR_OFFER)
+
+    result = run_trader_rag(
+        SULFUR_OFFER,
+        env={
+            "TRADER_RAG_PROVIDER": "spanner_rag,mcp",
+            "GOOGLE_CLOUD_PROJECT": "zenpulsar",
+            "SPANNER_RAG_INSTANCE_ID": "commodity-rag",
+            "SPANNER_RAG_DATABASE_ID": "trader_rag",
+            "OPOINT_API_KEY": "test-key",
+            "TRADER_RAG_MAX_RESULTS": "5",
+        },
+        search_plan=ledger.search_plan,
+    )
+
+    assert result.provider == "spanner_rag+opoint_mcp"
+    assert result.status == "retrieved"
+    assert {item.source for item in result.evidence} == {"spanner_rag", "opoint_mcp"}
+
+
 def test_yaml_source_layer_defaults_can_enable_google_agent_search(tmp_path) -> None:
     config_path = tmp_path / "source.yaml"
     config_path.write_text(
