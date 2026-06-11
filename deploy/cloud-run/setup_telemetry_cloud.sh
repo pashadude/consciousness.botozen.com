@@ -82,6 +82,7 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
 for role in \
   roles/artifactregistry.writer \
   roles/run.developer \
+  roles/secretmanager.secretAccessor \
   roles/cloudscheduler.admin; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${GITHUB_DEPLOYER_SA}" \

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import threading
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
@@ -546,11 +547,21 @@ def run_async_mcp(coro: Any) -> Any:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    if hasattr(coro, "close"):
-        coro.close()
-    raise RuntimeError(
-        "MCP RAG provider was called inside an active event loop; use the ADK MCP tool path for async workflows."
-    )
+    result: list[Any] = []
+    errors: list[BaseException] = []
+
+    def run_in_thread() -> None:
+        try:
+            result.append(asyncio.run(coro))
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_in_thread, daemon=True)
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
+    return result[0] if result else None
 
 
 async def fetch_mcp_search_records(

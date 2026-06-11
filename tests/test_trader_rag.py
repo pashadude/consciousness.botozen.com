@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from app.spec_state import SpecLedger, update_ledger_from_user_text
@@ -5,6 +6,7 @@ from app.trader_rag import (
     SearchEvidence,
     apply_rag_to_ledger,
     load_trader_source_config,
+    run_async_mcp,
     run_trader_rag,
     spanner_scan_terms,
 )
@@ -200,6 +202,16 @@ def test_mcp_opoint_provider_requires_key_for_vendored_server() -> None:
     assert result.provider == "opoint_mcp"
     assert result.status == "missing_config"
     assert any("OPOINT_API_KEY" in warning for warning in result.warnings)
+
+
+def test_run_async_mcp_inside_active_event_loop() -> None:
+    async def value():
+        return "ok"
+
+    async def inside_loop():
+        return run_async_mcp(value())
+
+    assert asyncio.run(inside_loop()) == "ok"
 
 
 def test_joined_spanner_and_mcp_provider_merges_evidence(monkeypatch) -> None:
