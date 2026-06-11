@@ -48,6 +48,7 @@ def test_dashboard_marks_configured_google_services_blue() -> None:
     assert "ON  Model Armor" in output
     assert "ON  BigQuery analytics: adk_agent_analytics" in output
     assert "ON  MCP research tools" in output
+    assert "ON  Trader source layer" in output
     assert "token_cost_est_usd: 0.020400" in output
 
 

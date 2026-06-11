@@ -40,6 +40,7 @@ from app.telemetry.domination import (
     nondominated_candidates,
     route_loss,
 )
+from app.trader_rag import TraderRagResult, apply_rag_to_ledger, run_trader_rag
 from app.verifiers import build_draft_from_ledger, verify_draft
 
 DEFAULT_CONSOLE_TEXT = "look at HO/RB arb and give me risk on this spread"
@@ -58,6 +59,7 @@ class ConsoleResult:
     candidates: list[RouteCandidate]
     frontier_keys: set[str]
     artifact_count: int
+    rag_result: TraderRagResult
 
 
 app = FastAPI(title="Mutual Spec Console")
@@ -114,6 +116,23 @@ async def create_spec_json(
                 ),
             },
             "frontier": [candidate.key for candidate in result.candidates if candidate.key in result.frontier_keys],
+            "source_layer": {
+                "provider": result.rag_result.provider,
+                "status": result.rag_result.status,
+                "queries": result.rag_result.queries,
+                "required_evidence": result.rag_result.required_evidence,
+                "warnings": result.rag_result.warnings,
+                "evidence": [
+                    {
+                        "title": item.title,
+                        "url": item.url,
+                        "summary": item.summary,
+                        "query": item.query,
+                        "source": item.source,
+                    }
+                    for item in result.rag_result.evidence
+                ],
+            },
         }
     )
 
@@ -136,6 +155,12 @@ def build_console_result(
         if artifact.mime_type and artifact.mime_type.startswith("image/"):
             ledger.verification_conditions.append("If image content is material, inspect or embed it before finalizing visual claims.")
     add_evidence_from_artifacts(ledger)
+    rag_result = run_trader_rag(
+        text,
+        env=os.environ,
+        search_plan=ledger.search_plan,
+    )
+    apply_rag_to_ledger(ledger, rag_result)
     formalize_ledger(ledger)
     record_stage(ledger, "draft_output")
     add_route(ledger, route_for_stage("draft_output", ledger))
@@ -155,7 +180,11 @@ def build_console_result(
         enqueue_async_job(ledger, route_decision)
         ledger.status = "async_pending"
     else:
-        ledger.status = "finalized" if verification.passed else "clarifying"
+        ledger.status = (
+            "finalized"
+            if verification.passed and ledger.decision_gate != "needs_more_info"
+            else "clarifying"
+        )
     candidates = sample_route_candidates(os.environ)
     frontier_keys = {candidate.key for candidate in nondominated_candidates(candidates)}
     return ConsoleResult(
@@ -166,6 +195,7 @@ def build_console_result(
         candidates=candidates,
         frontier_keys=frontier_keys,
         artifact_count=len(artifacts),
+        rag_result=rag_result,
     )
 
 
@@ -324,6 +354,7 @@ def render_workspace(
   </section>
   <section class="center-rail">
     {render_game_panel(result)}
+    {render_source_layer_panel(result)}
     {render_answer_panel(result)}
     {render_spec_panel(result)}
     {render_frontier_panel(result)}
@@ -376,6 +407,21 @@ def render_status_panel(env: Mapping[str, str]) -> str:
 def render_game_panel(result: ConsoleResult) -> str:
     ledger = result.ledger
     material_missing = [item.field for item in ledger.ambiguities]
+    gate_clear = result.verification_passed and ledger.decision_gate != "needs_more_info"
+    source_evidence = any(
+        item.source_type
+        in {
+            "google_agent_search",
+            "google_cse",
+            "mcp",
+            "rag",
+            "spanner_rag",
+            "vertex_ai_search",
+            "web",
+        }
+        for item in ledger.evidence
+        if item.used
+    )
     stages = [
         (
             "1. Elicitation",
@@ -392,14 +438,14 @@ def render_game_panel(result: ConsoleResult) -> str:
         (
             "3. Execution Graph",
             "Full-information graph game",
-            "Route to evidence, verifier, model-region frontier, and async work if needed.",
-            "done" if ledger.trajectory else "open",
+            "Route to search tools, model reasoning, verifier, model-region frontier, and async work if needed.",
+            "done" if source_evidence else "open",
         ),
         (
             "4. Gate",
             "Verification and budget condition",
             "Do not claim go/no-go until missing obligations are resolved.",
-            "done" if result.verification_passed else "blocked",
+            "done" if gate_clear else "blocked",
         ),
     ]
     rows = "\n".join(
@@ -419,6 +465,60 @@ def render_game_panel(result: ConsoleResult) -> str:
     <span class="muted">object = shared spec, not prompt answer</span>
   </div>
   <ol class="game-list">{rows}</ol>
+</section>
+"""
+
+
+def render_source_layer_panel(result: ConsoleResult) -> str:
+    ledger = result.ledger
+    source_rows = "\n".join(
+        f"""
+<li>
+  <strong>{escape(source.name)}</strong>
+  <span>{escape(source.source_type)} | {escape(source.status)} | confidence {escape(source.confidence)}</span>
+  <p>{escape(source.detail)}</p>
+</li>
+"""
+        for source in ledger.evidence_sources
+    ) or "<li><span>No source adapters recorded.</span></li>"
+    plan_rows = "\n".join(
+        f"""
+<li class="{escape(item.status)}">
+  <strong>{escape(item.purpose)}</strong>
+  <span>{escape(item.status)} | {escape(', '.join(item.preferred_sources))}</span>
+  <p>{escape(item.query)}</p>
+</li>
+"""
+        for item in ledger.search_plan
+    ) or "<li><span>No trader search plan.</span></li>"
+    evidence_rows = "\n".join(
+        f"""
+<li>
+  <strong>{escape(item.title)}</strong>
+  <span>{escape(item.source)} | {escape(item.query)}</span>
+  <p>{render_link(item.url)} {escape(item.summary)}</p>
+</li>
+"""
+        for item in result.rag_result.evidence
+    ) or "<li><span>No retrieved source evidence in this console run.</span></li>"
+    return f"""
+<section class="panel source-panel">
+  <div class="panel-title">
+    <h2>Trader Source Layer</h2>
+    <span class="muted">{escape(result.rag_result.provider)} / {escape(result.rag_result.status)}</span>
+  </div>
+  <details open>
+    <summary>Source Adapters</summary>
+    <ul class="source-list">{source_rows}</ul>
+  </details>
+  <details open>
+    <summary>Search Plan</summary>
+    <ul class="source-list">{plan_rows}</ul>
+  </details>
+  <details open>
+    <summary>Retrieved Evidence</summary>
+    <ul class="source-list">{evidence_rows}</ul>
+  </details>
 </section>
 """
 
@@ -576,6 +676,14 @@ def build_provisional_answer(result: ConsoleResult) -> list[str]:
                 "Gate: stay at needs_more_info until documents and counterparty are verified; a photo is evidence metadata only until visually inspected or embedded.",
             ]
         )
+        if result.rag_result.evidence:
+            answer.append(
+                "Source layer: retrieved search evidence is attached, but it is still not enough to clear the gate without seller documents, sanctions/payment checks, and executable resale economics."
+            )
+        else:
+            answer.append(
+                "Source layer: no live cited market/search evidence was retrieved in this run, so FOB 550, port/loading, sanctions, and resale claims remain unverified."
+            )
     elif ledger.latent_intent_hypotheses:
         answer.extend(
             [
@@ -608,6 +716,13 @@ def render_list(items: list[str]) -> str:
     if not items:
         return '<ul class="compact"><li>none</li></ul>'
     return "<ul class=\"compact\">" + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>"
+
+
+def render_link(url: str) -> str:
+    if not url:
+        return ""
+    safe_url = escape(url)
+    return f'<a href="{safe_url}" target="_blank" rel="noreferrer">{safe_url}</a>'
 
 
 def safe_filename(filename: str) -> str:
@@ -781,6 +896,14 @@ summary { cursor: pointer; margin-bottom: 8px; }
 .game-list strong { display: block; font-size: 14px; }
 .game-list span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .game-list p { font-size: 13px; margin-top: 6px; }
+.source-list { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.source-list li { border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: #fbfcfb; }
+.source-list li.satisfied { border-color: #b9d8c5; background: #f0fbf6; }
+.source-list li.failed { border-color: #e3a29b; background: #fff6f5; }
+.source-list strong { display: block; font-size: 13px; }
+.source-list span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.source-list p { font-size: 13px; margin-top: 5px; overflow-wrap: anywhere; }
+a { color: var(--blue); }
 .artifact-list { list-style: none; padding: 0; margin: 10px 0 0; display: grid; gap: 8px; }
 .artifact-list li { display: flex; flex-direction: column; gap: 2px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
 .table-wrap { overflow-x: auto; margin-top: 10px; }

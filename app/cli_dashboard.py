@@ -7,6 +7,8 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from app.trader_rag import load_trader_source_config
+
 ANSI = {
     "green": "\033[32m",
     "red": "\033[31m",
@@ -160,6 +162,32 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
         configured_value(env.get("MODEL_ARMOR_TEMPLATE_ID")) and project
     )
     mcp = configured_mcp(env)
+    trader_config = load_trader_source_config(env)
+    trader_source_provider = trader_config.provider
+    provider_key = (trader_source_provider or "").lower()
+    google_agent_search = trader_config.google_agent_search_enabled or provider_key in {
+        "google_agent_search",
+        "adk_google_search",
+        "google_search_tool",
+    }
+    google_cse = trader_config.google_search_api_key and trader_config.google_search_cx
+    vertex_search = (
+        trader_config.vertex_ai_search_data_store_id
+        or trader_config.vertex_ai_search_engine_id
+    )
+    spanner_rag = trader_config.spanner_configured
+    trader_source_configured = bool(
+        trader_source_provider
+        and provider_key not in {"disabled", "off", "none"}
+        and (
+            (google_agent_search and has_google_auth)
+            or google_cse
+            or mcp
+            or spanner_rag
+            or vertex_search
+            or provider_key in {"fixture", "model", "model_only"}
+        )
+    )
     return [
         StatusItem(
             "Vertex AI Gemini auth",
@@ -212,6 +240,11 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
             "MCP research tools",
             "blue" if mcp else "red",
             "MCP_RESEARCH_URL or MCP_RESEARCH_COMMAND (+ OPOINT_API_KEY for Opoint)",
+        ),
+        StatusItem(
+            "Trader source layer",
+            "blue" if trader_source_configured else "red",
+            "Spanner RAG, Google search, google_cse keys, Vertex AI Search, or MCP/Opoint",
         ),
     ]
 

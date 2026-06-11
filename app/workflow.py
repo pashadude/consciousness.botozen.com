@@ -6,15 +6,16 @@ import os
 import shlex
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from google.adk import Agent, Context, Event, Workflow
 from google.adk.events import RequestInput
+from google.adk.tools.google_search_tool import google_search
 from google.adk.tools.mcp_tool.mcp_session_manager import (
     StdioConnectionParams,
     StreamableHTTPConnectionParams,
 )
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+from google.adk.tools.vertex_ai_search_tool import VertexAiSearchTool
 from google.adk.workflow import node
 from google.genai import types
 from mcp import StdioServerParameters
@@ -31,7 +32,9 @@ from app.router import (
 )
 from app.spec_state import (
     ArtifactRef,
+    EvidenceSourceStatus,
     add_evidence_from_artifacts,
+    add_external_evidence,
     add_mcp_evidence_placeholder,
     add_route,
     apply_clarification_answer,
@@ -39,10 +42,12 @@ from app.spec_state import (
     ledger_from_state,
     ledger_to_state,
     needs_clarification,
+    record_evidence_source,
     record_stage,
     text_from_content,
     update_ledger_from_user_text,
 )
+from app.trader_rag import load_trader_source_config
 from app.verifiers import build_draft_from_ledger, format_final_response, verify_draft
 
 WORKFLOW_STAGE_ORDER = [
@@ -93,15 +98,71 @@ def build_mcp_research_tools() -> list[McpToolset]:
 
 MCP_RESEARCH_TOOLS = build_mcp_research_tools()
 
+
+def build_vertex_ai_search_tools() -> list[VertexAiSearchTool]:
+    """Build Agent Search / Vertex AI Search tool from YAML/env configuration."""
+
+    config = load_trader_source_config(os.environ)
+    if config.provider not in {"vertex_ai_search", "enterprise_search"}:
+        return []
+    data_store_id = config.vertex_ai_search_data_store_id
+    search_engine_id = config.vertex_ai_search_engine_id
+    if data_store_id:
+        return [
+            VertexAiSearchTool(
+                data_store_id=data_store_id,
+                max_results=config.max_results,
+            )
+        ]
+    if search_engine_id:
+        return [
+            VertexAiSearchTool(
+                search_engine_id=search_engine_id,
+                max_results=config.max_results,
+            )
+        ]
+    return []
+
+
+VERTEX_AI_SEARCH_TOOLS = build_vertex_ai_search_tools()
+
 mcp_research_agent = Agent(
     name="mcp_research_agent",
     model=CHEAP_MODEL.model_name,
     instruction=(
         "Use the configured MCP research tools to retrieve evidence for the "
-        "current task specification. Return compact bullet points with source "
-        "titles, source URIs, and the exact facts used. Do not invent sources."
+        "data_agent_retrieval payload. Return compact bullet points with source "
+        "titles, source URIs, exact facts used, freshness, and confidence. "
+        "Do not answer the user directly and do not invent sources."
     ),
     tools=MCP_RESEARCH_TOOLS,
+    output_schema=str,
+)
+
+google_search_agent = Agent(
+    name="google_search_agent",
+    model=CHEAP_MODEL.model_name,
+    instruction=(
+        "Use Google's native search tool to retrieve cited evidence for the "
+        "data_agent_retrieval payload. Focus on price benchmarks, logistics, documents, "
+        "counterparty/compliance risk, and resale economics. Return compact "
+        "bullets with source title, URL, query/purpose, and exact fact used. "
+        "Do not answer the trade directly and do not invent sources."
+    ),
+    tools=[google_search],
+    output_schema=str,
+)
+
+vertex_ai_search_agent = Agent(
+    name="vertex_ai_search_agent",
+    model=CHEAP_MODEL.model_name,
+    instruction=(
+        "Search the private Agent Search / Vertex AI Search commodity corpus "
+        "for the data_agent_retrieval payload. Return compact bullets with source title, "
+        "document URI if available, query/purpose, exact fact used, date, "
+        "commodity, region, and confidence. Do not answer the trade directly."
+    ),
+    tools=VERTEX_AI_SEARCH_TOOLS,
     output_schema=str,
 )
 
@@ -130,7 +191,9 @@ def hypothesize_spec_node(ctx: Context, node_input: Any = None) -> Event:
         route = "clarify"
     elif async_jobs_enabled() and route_async_decision(
         ledger,
-        mcp_configured=bool(MCP_RESEARCH_TOOLS),
+        mcp_configured=bool(MCP_RESEARCH_TOOLS)
+        or google_agent_search_enabled()
+        or vertex_ai_search_enabled(),
         telemetry_enabled=env_flag("RESOURCE_REGION_DOMINATION_ENABLED"),
     ).should_enqueue:
         route = "async"
@@ -177,7 +240,9 @@ def apply_clarification_node(ctx: Context, node_input: Any = None) -> Event:
         route = "clarify"
     elif async_jobs_enabled() and route_async_decision(
         ledger,
-        mcp_configured=bool(MCP_RESEARCH_TOOLS),
+        mcp_configured=bool(MCP_RESEARCH_TOOLS)
+        or google_agent_search_enabled()
+        or vertex_ai_search_enabled(),
         telemetry_enabled=env_flag("RESOURCE_REGION_DOMINATION_ENABLED"),
     ).should_enqueue:
         route = "async"
@@ -196,7 +261,9 @@ def enqueue_async_job_node(ctx: Context, node_input: Any = None) -> Event:
     record_stage(ledger, "enqueue_async_job")
     decision = route_async_decision(
         ledger,
-        mcp_configured=bool(MCP_RESEARCH_TOOLS),
+        mcp_configured=bool(MCP_RESEARCH_TOOLS)
+        or google_agent_search_enabled()
+        or vertex_ai_search_enabled(),
         telemetry_enabled=env_flag("RESOURCE_REGION_DOMINATION_ENABLED"),
     )
     job = enqueue_async_job(ledger, decision)
@@ -225,6 +292,107 @@ async def retrieve_evidence_node(ctx: Context, node_input: Any = None) -> Event:
     add_route(ledger, route_for_stage("retrieve_evidence", ledger))
     add_evidence_from_artifacts(ledger)
     await add_multimodal_evidence_from_artifacts(ctx, ledger)
+    if vertex_ai_search_enabled() and ledger.search_plan:
+        record_evidence_source(
+            ledger,
+            EvidenceSourceStatus(
+                source_type="vertex_ai_search",
+                name="vertex_ai_search_agent",
+                status="configured",
+                detail="ADK workflow will call VertexAiSearchTool for the private commodity corpus.",
+                confidence="high",
+            ),
+        )
+        route = "vertex_search"
+    elif google_agent_search_enabled() and ledger.search_plan:
+        record_evidence_source(
+            ledger,
+            EvidenceSourceStatus(
+                source_type="google_agent_search",
+                name="google_search_agent",
+                status="configured",
+                detail="ADK workflow will call google_search for the trader evidence plan.",
+                confidence="high",
+            ),
+        )
+        route = "google_search"
+    elif MCP_RESEARCH_TOOLS:
+        source = os.environ.get("MCP_RESEARCH_URL") or os.environ.get("MCP_RESEARCH_COMMAND") or "mcp://configured"
+        add_mcp_evidence_placeholder(ledger, source)
+        route = "mcp"
+    else:
+        route = "local"
+    return Event(
+        output=build_data_agent_request(ledger, route),
+        route=route,
+        state=ledger_to_state(ledger),
+    )
+
+
+@node(name="merge_vertex_ai_search")
+def merge_vertex_ai_search_node(ctx: Context, node_input: Any = None) -> Event:
+    ledger = ledger_from_state(ctx.state)
+    record_stage(ledger, "merge_vertex_ai_search")
+    if node_input:
+        query = "; ".join(item.query for item in ledger.search_plan[:3])
+        add_external_evidence(
+            ledger,
+            source_type="vertex_ai_search",
+            title="Private commodity corpus search summary",
+            uri=(
+                os.environ.get("VERTEX_AI_SEARCH_DATA_STORE_ID")
+                or os.environ.get("VERTEX_AI_SEARCH_ENGINE_ID")
+                or "vertex-ai-search://configured"
+            ),
+            summary=str(node_input)[:1500],
+            source_name="vertex_ai_search_agent",
+            query=query or None,
+            confidence="high",
+        )
+        record_evidence_source(
+            ledger,
+            EvidenceSourceStatus(
+                source_type="vertex_ai_search",
+                name="vertex_ai_search_agent",
+                status="retrieved",
+                detail="Private Agent Search corpus returned a grounded summary.",
+                confidence="high",
+            ),
+        )
+    route = "google_search" if google_agent_search_enabled() else "mcp" if MCP_RESEARCH_TOOLS else "local"
+    return Event(
+        output=ledger.model_dump(mode="json"),
+        route=route,
+        state=ledger_to_state(ledger),
+    )
+
+
+@node(name="merge_google_search")
+def merge_google_search_node(ctx: Context, node_input: Any = None) -> Event:
+    ledger = ledger_from_state(ctx.state)
+    record_stage(ledger, "merge_google_search")
+    if node_input:
+        query = "; ".join(item.query for item in ledger.search_plan[:3])
+        add_external_evidence(
+            ledger,
+            source_type="google_agent_search",
+            title="Google Agent SDK search summary",
+            uri="google-search://adk-tool",
+            summary=str(node_input)[:1500],
+            source_name="google_search_agent",
+            query=query or None,
+            confidence="high",
+        )
+        record_evidence_source(
+            ledger,
+            EvidenceSourceStatus(
+                source_type="google_agent_search",
+                name="google_search_agent",
+                status="retrieved",
+                detail="Google native search tool returned a grounded summary.",
+                confidence="high",
+            ),
+        )
     if MCP_RESEARCH_TOOLS:
         source = os.environ.get("MCP_RESEARCH_URL") or os.environ.get("MCP_RESEARCH_COMMAND") or "mcp://configured"
         add_mcp_evidence_placeholder(ledger, source)
@@ -243,19 +411,73 @@ def merge_mcp_research_node(ctx: Context, node_input: Any = None) -> Event:
     ledger = ledger_from_state(ctx.state)
     record_stage(ledger, "merge_mcp_research")
     if node_input:
-        evidence_id = f"mcp:summary:{uuid4().hex[:8]}"
-        ledger.evidence.append(
-            {
-                "evidence_id": evidence_id,
-                "source_type": "mcp",
-                "title": "MCP research summary",
-                "uri": os.environ.get("MCP_RESEARCH_URL") or "mcp://stdio",
-                "summary": str(node_input)[:1000],
-                "used": True,
-            }
+        add_external_evidence(
+            ledger,
+            source_type="mcp",
+            title="MCP research summary",
+            uri=os.environ.get("MCP_RESEARCH_URL") or "mcp://stdio",
+            summary=str(node_input)[:1500],
+            source_name="mcp_research_agent",
+            confidence="medium",
         )
-        ledger.evidence_used.append(evidence_id)
+        record_evidence_source(
+            ledger,
+            EvidenceSourceStatus(
+                source_type="mcp",
+                name="mcp_research_agent",
+                status="retrieved",
+                detail="MCP/Opoint research returned a summary.",
+                confidence="medium",
+            ),
+        )
     return Event(output=ledger.model_dump(mode="json"), state=ledger_to_state(ledger))
+
+
+def build_data_agent_request(
+    ledger: Any,
+    source_kind: str,
+) -> dict[str, Any]:
+    """Minimal retrieval-agent handoff; data agents do not need full ledger state."""
+
+    return {
+        "request_type": "data_agent_retrieval",
+        "source_kind": source_kind,
+        "ledger_id": ledger.ledger_id,
+        "expressed_query": ledger.expressed_query or ledger.user_request,
+        "goal": ledger.goal,
+        "audience": ledger.audience,
+        "output_format": ledger.output_format,
+        "decision_gate": ledger.decision_gate,
+        "search_plan": [
+            {
+                "query_id": item.query_id,
+                "query": item.query,
+                "purpose": item.purpose,
+                "required": item.required,
+                "preferred_sources": item.preferred_sources,
+            }
+            for item in ledger.search_plan
+            if item.required
+        ],
+        "proof_obligations": ledger.verification_conditions,
+        "constraints": ledger.constraints,
+        "artifact_refs": [
+            {
+                "artifact_id": artifact.artifact_id,
+                "filename": artifact.filename,
+                "mime_type": artifact.mime_type,
+                "source": artifact.source,
+                "note": artifact.note,
+            }
+            for artifact in ledger.artifact_refs
+        ],
+        "instructions": [
+            "Retrieve evidence only; do not answer the user directly.",
+            "Return cited source title, URI, exact fact, date/freshness, and confidence.",
+            "Separate retrieved fact from inference and missing evidence.",
+            "Do not invent sources or use uncited market facts.",
+        ],
+    }
 
 
 @node(name="local_evidence_ready")
@@ -385,6 +607,24 @@ def env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def google_agent_search_enabled() -> bool:
+    config = load_trader_source_config(os.environ)
+    provider = config.provider
+    return config.google_auth_configured and (
+        config.google_agent_search_enabled
+        or provider
+        in {
+            "google_agent_search",
+            "adk_google_search",
+            "google_search_tool",
+        }
+    )
+
+
+def vertex_ai_search_enabled() -> bool:
+    return bool(VERTEX_AI_SEARCH_TOOLS)
+
+
 def build_workflow() -> Workflow:
     return Workflow(
         name="root_agent",
@@ -413,6 +653,25 @@ def build_workflow() -> Workflow:
             ),
             (
                 retrieve_evidence_node,
+                {
+                    "vertex_search": vertex_ai_search_agent,
+                    "google_search": google_search_agent,
+                    "mcp": mcp_research_agent,
+                    "local": local_evidence_ready_node,
+                },
+            ),
+            (vertex_ai_search_agent, merge_vertex_ai_search_node),
+            (
+                merge_vertex_ai_search_node,
+                {
+                    "google_search": google_search_agent,
+                    "mcp": mcp_research_agent,
+                    "local": local_evidence_ready_node,
+                },
+            ),
+            (google_search_agent, merge_google_search_node),
+            (
+                merge_google_search_node,
                 {
                     "mcp": mcp_research_agent,
                     "local": local_evidence_ready_node,

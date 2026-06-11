@@ -1,0 +1,58 @@
+# Default source policy for proof-carrying trader decision frames.
+#
+# This file intentionally contains no secrets. Environment variables still
+# override these values for local runs, Cloud Run, and CI/CD.
+
+default_provider: spanner_rag
+
+limits:
+  max_queries: 3
+  max_results: 5
+  timeout_seconds: 6
+
+google_agent_search:
+  # ADK workflow path. Uses google.adk.tools.google_search_tool.google_search.
+  # Requires GOOGLE_GENAI_USE_VERTEXAI=true plus GOOGLE_CLOUD_PROJECT and
+  # GOOGLE_CLOUD_LOCATION, or Gemini API key auth.
+  enabled: true
+
+google_cse:
+  # Direct FastAPI console path through Google Custom Search JSON API.
+  # Use this when you want /spec to retrieve links without going through ADK.
+  cx_env: GOOGLE_SEARCH_CX
+  api_key_env: GOOGLE_SEARCH_API_KEY
+
+spanner_rag:
+  # Private commodity corpus target. Build JSONL with
+  # scripts/prepare_spanner_rag_json.py, load it into Cloud Spanner, generate
+  # Gemini embeddings, then query with hybrid full-text + vector search.
+  instance_id_env: SPANNER_RAG_INSTANCE_ID
+  database_id_env: SPANNER_RAG_DATABASE_ID
+  documents_table_env: SPANNER_RAG_DOCUMENTS_TABLE
+  chunks_table_env: SPANNER_RAG_CHUNKS_TABLE
+  embedding_model_env: SPANNER_RAG_EMBEDDING_MODEL
+  documents_table: RagDocuments
+  chunks_table: RagChunks
+  embedding_model: RagEmbeddingModel
+  corpus_hint: commodity_articles_spanner
+
+vertex_ai_search:
+  # Optional alternate private corpus path. Spanner is the chosen default.
+  data_store_id_env: VERTEX_AI_SEARCH_DATA_STORE_ID
+  search_engine_id_env: VERTEX_AI_SEARCH_ENGINE_ID
+  corpus_hint: commodity_articles
+
+mcp:
+  # Your Opoint MCP server can run in parallel with Google search when
+  # MCP_RESEARCH_COMMAND/MCP_RESEARCH_URL is configured.
+  opoint_command_env: MCP_RESEARCH_COMMAND
+  opoint_cwd_env: MCP_RESEARCH_CWD
+  opoint_api_key_env: OPOINT_API_KEY
+
+fixture:
+  # Deterministic local evidence for tests/demos.
+  path_env: TRADER_RAG_FIXTURE_PATH
+
+model:
+  # Model-only summaries are hypotheses, not sufficient evidence for gate clear.
+  allow_model_only: true

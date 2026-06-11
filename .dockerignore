@@ -7,5 +7,6 @@ __pycache__
 *.py[cod]
 .env
 app/.adk
+data/spanner_rag_ingest
 docs/agent-building insights
 docs/research

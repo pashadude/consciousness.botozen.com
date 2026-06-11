@@ -72,15 +72,28 @@ flowchart LR
     A -->|still ambiguous| C
     A -->|resolved| R[retrieve_evidence]
     H -->|resolved or safe refusal path| R
-    R -->|MCP configured| M[mcp_research_agent]
+    R --> Q[data_agent_retrieval request]
+    Q -->|private commodity corpus| P[Spanner hybrid RAG]
+    P --> PE[data agent evidence summary]
+    PE -->|optional web search| G[google_search_agent]
+    Q -->|Google web search| G
+    G --> GE[merge_google_search]
+    GE -->|optional MCP/Opoint| M[mcp_research_agent]
+    Q -->|MCP configured| M
     M --> ME[merge_mcp_research]
     ME --> D[draft_output]
-    R -->|local artifacts/session evidence| L[local_evidence_ready]
+    Q -->|local artifacts/session evidence| L[local_evidence_ready]
     L --> D
     D --> V[verify]
     V -->|pass or safety refusal| F[finalize]
     V -->|failed verification| H
 ```
+
+The live/front agent owns elicitation, specification, routing, and verification
+state. It passes a minimal `data_agent_retrieval` payload to source agents that
+have access to private corpora, Google search, or MCP/Opoint tools. Data agents
+retrieve cited evidence only; they do not answer the trader directly. Merge
+nodes write source summaries back to the ledger for the verifier and judge.
 
 ## Repository Layout
 
@@ -102,7 +115,8 @@ flowchart LR
 │   ├── cloud-run/            # Telemetry Cloud Run Job and Scheduler scripts
 │   └── deploy_runtime.py     # Agent Runtime and optional Cloud Run deployment
 ├── config/
-│   └── region_power_map.example.yaml
+│   ├── region_power_map.example.yaml
+│   └── trader_source_layer.yaml
 ├── sql/
 │   ├── gcp_resource_billing_hourly.example.sql
 │   └── resource_region_criteria_view.example.sql
@@ -294,6 +308,190 @@ export MCP_RESEARCH_CWD=/Users/pauldudko/VSProjects/mcp_opoint
 
 When MCP is configured, the workflow routes through `mcp_research_agent`, which is built with ADK's `McpToolset`. ADK supports MCP tools for connecting agents to external tool servers over stdio or remote transports. [6]
 
+## Trader Source Layer
+
+Trader prompts are treated like high-stakes review workflows, not casual chat.
+Long context and strong models are useful for reasoning, but they do not replace
+retrieval when the answer must be cited, falsified, and reviewed. The ledger
+therefore stores a source/search contract in `app/spec_state.py`:
+
+- `search_plan`: queries and proof obligations inferred from the compressed trader signal.
+- `evidence_sources`: which source adapters were configured, skipped, queried, or failed.
+- `evidence`: cited artifacts, Google search summaries, Google CSE/RAG results, MCP/Opoint summaries, Spanner RAG results, Vertex AI Search results, or low-confidence model-only summaries.
+
+For a physical commodity offer such as sulfur FOB Umm Qasr, the spec game
+automatically requires evidence for price benchmarks, product specification,
+counterparty/title/payment, port/loading/freight, sanctions/bankability, and
+resale/netback economics. The gate remains `needs_more_info` until those
+obligations are satisfied. This is the same reason RAG remains useful in legal,
+tax, and compliance workflows: getting an answer is weaker than producing the
+right answer with the right source trail.
+
+Source modes:
+
+```bash
+# Defaults live here. Env vars override this file.
+export TRADER_SOURCE_LAYER_CONFIG=config/trader_source_layer.yaml
+
+# Default from YAML: ADK workflow path using Google's native google_search tool.
+# No extra env is needed beyond Google auth/project env.
+
+# Direct console/Cloud Run path: Google Programmable Search / Custom Search JSON API.
+export TRADER_RAG_PROVIDER=google_cse
+export GOOGLE_SEARCH_CX=your-programmable-search-engine-id
+export GOOGLE_SEARCH_API_KEY=your-api-key
+
+# Private/domain corpus path, when configured.
+export TRADER_RAG_PROVIDER=spanner_rag
+export SPANNER_RAG_INSTANCE_ID=commodity-rag
+export SPANNER_RAG_DATABASE_ID=trader_rag
+
+# Deterministic local evidence for tests/demos.
+export TRADER_RAG_PROVIDER=fixture
+export TRADER_RAG_FIXTURE_PATH=tests/fixtures/trader_search_results.json
+
+# Low-confidence hypothesis only. Useful for debugging, not for gate clearing.
+export TRADER_RAG_PROVIDER=model
+```
+
+Use `spanner_rag` for your private commodity corpus. Use
+`google_agent_search` inside `adk web`/Agent Runtime when you want Google's
+Agent SDK tool path for public web evidence. Use `google_cse` for the FastAPI
+console because it can call the Custom Search JSON API directly and render
+retrieved links on `/spec`. Use MCP/Opoint in parallel when your own search/news
+corpus is better than general web search.
+
+The default YAML describes where the private corpus attaches:
+
+```yaml
+spanner_rag:
+  instance_id_env: SPANNER_RAG_INSTANCE_ID
+  database_id_env: SPANNER_RAG_DATABASE_ID
+  documents_table: RagDocuments
+  chunks_table: RagChunks
+  corpus_hint: commodity_articles_spanner
+```
+
+Until the Spanner schema, embeddings, and indexes exist, the source layer can
+use Google Agent SDK search, Google CSE, MCP/Opoint, uploaded artifacts, or
+deterministic fixtures, but it is not grounded in your article library.
+
+### Ingest Commodity Articles
+
+The first private corpus is local commodity/news data normalized into JSONL for
+Spanner ingestion:
+
+```bash
+uv run python scripts/prepare_spanner_rag_json.py \
+  --out-dir data/spanner_rag_ingest
+```
+
+The converter reads:
+
+- `/Users/pauldudko/VSProjects/sentiment_signal_oil/Data/Sentiment/all_oil_data_final_sentiment_fixed_adjusted.csv`
+- `/Users/pauldudko/VSProjects/adm/data/sugar_news_tagged_macro.jsonl`
+- `/Users/pauldudko/VSProjects/metaprompting/output_data/fertilizer_news_march_april_2025.csv`
+- `/Users/pauldudko/VSProjects/metaprompting/output_data/base_metals/Archive/aluminum_news_knn_result.csv`
+- `/Users/pauldudko/VSProjects/metaprompting/output_data/base_metals/Archive/base_metals_news.csv`
+
+It writes:
+
+```text
+data/spanner_rag_ingest/documents.jsonl
+data/spanner_rag_ingest/chunks.jsonl
+data/spanner_rag_ingest/manifest.json
+```
+
+These generated files are ignored by git because the current corpus is multiple
+gigabytes.
+
+Create the Spanner resources:
+
+```bash
+gcloud services enable spanner.googleapis.com aiplatform.googleapis.com \
+  --project zenpulsar
+
+gcloud spanner instances create commodity-rag \
+  --project zenpulsar \
+  --config=regional-us-central1 \
+  --description="Commodity RAG corpus" \
+  --processing-units=100
+
+gcloud spanner databases create trader_rag \
+  --project zenpulsar \
+  --instance commodity-rag
+```
+
+Apply the schema in [sql/spanner_rag_schema.example.sql](sql/spanner_rag_schema.example.sql).
+The schema defines document/chunk tables, hidden full-text token columns, a
+search index, a vector index, and a remote Gemini embedding model. Cloud Spanner
+documents full-text search with token columns/search indexes, vector indexes,
+and hybrid full-text/vector search with reciprocal rank fusion. [25] [26] [27]
+
+Upload the generated JSONL to GCS before bulk loading:
+
+```bash
+gcloud storage buckets create gs://zenpulsar-spanner-rag-ingest \
+  --project zenpulsar \
+  --location=US
+
+gcloud storage cp data/spanner_rag_ingest/documents.jsonl \
+  gs://zenpulsar-spanner-rag-ingest/documents.jsonl
+gcloud storage cp data/spanner_rag_ingest/chunks.jsonl \
+  gs://zenpulsar-spanner-rag-ingest/chunks.jsonl
+gcloud storage cp data/spanner_rag_ingest/manifest.json \
+  gs://zenpulsar-spanner-rag-ingest/manifest.json
+```
+
+The same upload is wrapped by:
+
+```bash
+scripts/upload_spanner_rag_ingest.sh
+```
+
+The Spanner API, instance, and database setup is wrapped by:
+
+```bash
+deploy/cloud-run/setup_spanner_rag_cloud.sh
+```
+
+Load strategy:
+
+1. Bulk load `documents.jsonl` into `RagDocuments`.
+2. Bulk load `chunks.jsonl` into `RagChunks`.
+3. Generate embeddings for `RagChunks.TextForEmbedding` with
+   `gemini-embedding-001` and `RETRIEVAL_DOCUMENT`.
+4. Build or rebuild `RagChunksEmbeddingIndex` after the bulk embedding pass.
+5. Query with [sql/spanner_rag_hybrid_search.example.sql](sql/spanner_rag_hybrid_search.example.sql):
+   full-text recall plus vector semantic recall, fused with reciprocal rank
+   fusion so business-critical exact terms such as `Umm Qasr`, `FOB`, `sulfur`,
+   `sanctions`, and source names cannot be washed out by embeddings alone.
+
+Set the app env:
+
+```bash
+TRADER_RAG_PROVIDER=spanner_rag
+SPANNER_RAG_INSTANCE_ID=commodity-rag
+SPANNER_RAG_DATABASE_ID=trader_rag
+SPANNER_RAG_DOCUMENTS_TABLE=RagDocuments
+SPANNER_RAG_CHUNKS_TABLE=RagChunks
+SPANNER_RAG_EMBEDDING_MODEL=RagEmbeddingModel
+TRADER_SOURCE_LAYER_CONFIG=config/trader_source_layer.yaml
+```
+
+If you later create an Agent Search app/engine as an alternate private corpus,
+copy the full engine resource:
+
+```bash
+VERTEX_AI_SEARCH_ENGINE_ID=projects/zenpulsar/locations/global/collections/default_collection/engines/YOUR_ENGINE_ID
+```
+
+The FastAPI console records source state. Live private corpus retrieval should
+run as a data-agent handoff that receives only the `data_agent_retrieval`
+payload, queries Spanner hybrid search, and returns cited evidence summaries to
+the front agent. That keeps user data, source evidence, and model reasoning
+separated.
+
 ## Async Escalation Jobs
 
 The light route can hand off high-gain work to a local async queue instead of
@@ -387,6 +585,22 @@ POWER_PRICE_SOURCE=static_region_power_map
 ASYNC_JOB_ENABLED=false
 ASYNC_JOB_STORE_PATH=app/.adk/async_jobs.jsonl
 
+TRADER_SOURCE_LAYER_CONFIG=config/trader_source_layer.yaml
+# Optional overrides:
+TRADER_RAG_PROVIDER=spanner_rag
+GOOGLE_AGENT_SEARCH_ENABLED=true
+TRADER_RAG_MAX_QUERIES=3
+TRADER_RAG_MAX_RESULTS=5
+TRADER_RAG_TIMEOUT_SECONDS=6
+SPANNER_RAG_INSTANCE_ID=commodity-rag
+SPANNER_RAG_DATABASE_ID=trader_rag
+SPANNER_RAG_DOCUMENTS_TABLE=RagDocuments
+SPANNER_RAG_CHUNKS_TABLE=RagChunks
+SPANNER_RAG_EMBEDDING_MODEL=RagEmbeddingModel
+# For direct console Google CSE mode instead of ADK google_search:
+# GOOGLE_SEARCH_CX=your-programmable-search-engine-id
+# GOOGLE_SEARCH_API_KEY=your-api-key
+
 MUTUAL_SPEC_CHEAP_MODEL=gemini-3.5-flash
 MUTUAL_SPEC_STRONG_MODEL=gemini-3.5-flash
 MUTUAL_SPEC_VERIFIER_MODEL=gemini-3.5-flash
@@ -408,7 +622,17 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | Cloud Storage | `storage.googleapis.com` | GCS-backed ADK artifacts and analytics payload storage. |
 | Cloud Logging API | `logging.googleapis.com` | Runtime logs and feedback events. |
 
-4. Enable deployment APIs if you want Agent Runtime or Cloud Run:
+4. Enable source-layer APIs only for the adapters you will use:
+
+| Source mode | Console/API to enable | Env needed |
+| --- | --- | --- |
+| `spanner_rag` | Cloud Spanner API plus Vertex AI API for Gemini embeddings | `TRADER_RAG_PROVIDER=spanner_rag`, `SPANNER_RAG_INSTANCE_ID`, `SPANNER_RAG_DATABASE_ID` |
+| `google_agent_search` | Vertex AI API plus ADK/Agent Runtime credentials | `GOOGLE_AGENT_SEARCH_ENABLED=true` |
+| `google_cse` | Google Cloud Console -> APIs & Services -> Library -> Custom Search API | `GOOGLE_SEARCH_CX`, `GOOGLE_SEARCH_API_KEY` |
+| `vertex_ai_search` | Optional Vertex AI Search / Agent Builder data store | `VERTEX_AI_SEARCH_DATA_STORE_ID` or `VERTEX_AI_SEARCH_ENGINE_ID` |
+| `mcp` / Opoint | Your local or remote MCP server | `MCP_RESEARCH_COMMAND`/`MCP_RESEARCH_URL`, plus `OPOINT_API_KEY` for Opoint |
+
+5. Enable deployment APIs if you want Agent Runtime or Cloud Run:
 
 | Console API name | API ID | Why this repo needs it |
 | --- | --- | --- |
@@ -416,7 +640,7 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | Cloud Build API | `cloudbuild.googleapis.com` | Builds deployment containers when needed. |
 | Artifact Registry API | `artifactregistry.googleapis.com` | Stores deployment images/artifacts. |
 
-5. Enable all-resource region domination telemetry APIs when you want live collector runs:
+6. Enable all-resource region domination telemetry APIs when you want live collector runs:
 
 | Console API name | API ID | Why this repo will need it |
 | --- | --- | --- |
@@ -428,22 +652,22 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | Dataflow API | `dataflow.googleapis.com` | Optional streaming/batch consumer if Cloud Run is not enough. |
 | BigQuery Data Transfer Service API | `bigquerydatatransfer.googleapis.com` | Required for Cloud Billing pricing export setup. |
 
-6. Create two Cloud Storage buckets:
+7. Create two Cloud Storage buckets:
 
 | Bucket | Suggested name | `.env` variable |
 | --- | --- | --- |
 | ADK artifacts | `your-project-id-adk-artifacts` | `ARTIFACTS_GCS_BUCKET` |
 | BigQuery analytics spill/log payloads | `your-project-id-adk-analytics` | `BQ_ANALYTICS_GCS_BUCKET` |
 
-7. Create BigQuery datasets for agent analytics and telemetry:
+8. Create BigQuery datasets for agent analytics and telemetry:
 
 | Dataset ID | `.env` variable | Purpose |
 | --- | --- | --- |
 | `adk_agent_analytics` | `BQ_ANALYTICS_DATASET_ID` | ADK/Agent Runtime analytics. |
 | `telemetry` | `TELEMETRY_DATASET_ID` | Billing export, power prices, and resource-region criteria views. |
 
-8. Turn on Cloud Billing export to BigQuery for cost truth. In `Billing -> Billing export -> BigQuery export`, enable `Detailed usage cost data` and `Pricing data` into the telemetry BigQuery dataset. Google notes detailed export includes resource-level cost data, and pricing export writes SKU pricing data. [17]
-9. Create the all-resource Cloud Asset Inventory feed and subscription:
+9. Turn on Cloud Billing export to BigQuery for cost truth. In `Billing -> Billing export -> BigQuery export`, enable `Detailed usage cost data` and `Pricing data` into the telemetry BigQuery dataset. Google notes detailed export includes resource-level cost data, and pricing export writes SKU pricing data. [17]
+10. Create the all-resource Cloud Asset Inventory feed and subscription:
 
 ```bash
 gcloud pubsub topics create gcp-all-resource-changes \
@@ -460,7 +684,7 @@ gcloud asset feeds create all-resource-feed \
   --content-type=resource
 ```
 
-10. Initialize local collector tables and views after `.env` points at the project:
+11. Initialize local collector tables and views after `.env` points at the project:
 
 ```bash
 uv run mutual-spec-telemetry init-tables
@@ -523,7 +747,7 @@ uv run adk web app
 2. Check that billing is attached to the grant account: open `Billing`, then `My projects`, and confirm the selected project is linked to the billing account or grant credits.
 3. Pick one region and use it consistently. This README uses `us-central1`, so set `GOOGLE_CLOUD_LOCATION=us-central1` and `MODEL_ARMOR_LOCATION=us-central1`. If you already deployed in another supported region, use that same region everywhere.
 4. Enable APIs from the console: open `APIs & Services`, then `Library`, search for each API, open it, and click `Enable`. Google documents this as the standard console flow for enabling APIs. [13]
-5. Enable these APIs for the full green-box path: `Vertex AI API`, `Model Armor API`, `BigQuery API`, `Cloud Logging API`, `Cloud Storage`, `Cloud Run Admin API`, `Cloud Build API`, and `Artifact Registry API`. If you are building the all-resource region domination layer, also enable `Cloud Asset API`, `Pub/Sub API`, `Cloud Monitoring API`, `Cloud Billing API`, `Cloud Scheduler API`, `Dataflow API`, and `BigQuery Data Transfer Service API`.
+5. Enable these APIs for the full green-box path: `Vertex AI API`, `Model Armor API`, `BigQuery API`, `Cloud Logging API`, `Cloud Storage`, `Cloud Run Admin API`, `Cloud Build API`, and `Artifact Registry API`. For trader source evidence, set `TRADER_RAG_PROVIDER=google_agent_search` and `GOOGLE_AGENT_SEARCH_ENABLED=true` for the ADK Google search tool path. If you want direct console search through `google_cse`, also enable `Custom Search API`, create/copy a Programmable Search Engine ID into `GOOGLE_SEARCH_CX`, and create/copy an API key into `GOOGLE_SEARCH_API_KEY`. If you are building the all-resource region domination layer, also enable `Cloud Asset API`, `Pub/Sub API`, `Cloud Monitoring API`, `Cloud Billing API`, `Cloud Scheduler API`, `Dataflow API`, and `BigQuery Data Transfer Service API`.
 6. Create the artifacts bucket: open `Cloud Storage`, then `Buckets`, click `Create`, enter a globally unique name such as `your-project-id-adk-artifacts`, choose the same region or a compatible multi-region, keep Standard storage, and finish creation. Copy only the bucket name into `ARTIFACTS_GCS_BUCKET`; do not include `gs://`. Google notes that the bucket name is set at creation and must be globally unique. [14]
 7. Create the analytics bucket the same way, for example `your-project-id-adk-analytics`, and copy the bucket name into `BQ_ANALYTICS_GCS_BUCKET`.
 8. Create the BigQuery datasets: open `BigQuery`, use the `Explorer` pane, select your project, click the project actions menu, choose `Create dataset`, set Dataset ID to `adk_agent_analytics`, choose the location, and click `Create dataset`. Repeat with Dataset ID `telemetry`. Copy `adk_agent_analytics` into `BQ_ANALYTICS_DATASET_ID` and `telemetry` into `TELEMETRY_DATASET_ID`. Google notes dataset location is fixed after creation. [15]
@@ -740,6 +964,15 @@ GCP_DEPLOYER_SERVICE_ACCOUNT
 TELEMETRY_RUNTIME_SERVICE_ACCOUNT
 TELEMETRY_SCHEDULER_SERVICE_ACCOUNT
 CONSOLE_RUNTIME_SERVICE_ACCOUNT
+TRADER_SOURCE_LAYER_CONFIG
+TRADER_RAG_PROVIDER
+GOOGLE_AGENT_SEARCH_ENABLED
+SPANNER_RAG_INSTANCE_ID
+SPANNER_RAG_DATABASE_ID
+SPANNER_RAG_DOCUMENTS_TABLE
+SPANNER_RAG_CHUNKS_TABLE
+SPANNER_RAG_EMBEDDING_MODEL
+SPANNER_RAG_GCS_BUCKET
 ```
 
 No Google service-account JSON key is required. Google recommends Workload
@@ -749,9 +982,20 @@ OIDC token that Google exchanges for short-lived credentials. [23]
 Manual deploy from this machine:
 
 ```bash
+set -a
+source .env
+set +a
+
+uv run pytest
+uv run mutual-spec-dashboard --no-color \
+  "Look i have an offer of 50000 tonns of sulfur in Iraq, Umm Qasr, fob 550, should i go for it?"
+
 export PROJECT_ID=zenpulsar
 export REGION=us-central1
 export IMAGE_URI=us-central1-docker.pkg.dev/zenpulsar/mutual-spec/mutual-spec-agent:manual
+
+deploy/cloud-run/setup_spanner_rag_cloud.sh
+scripts/upload_spanner_rag_ingest.sh
 
 gcloud auth configure-docker us-central1-docker.pkg.dev
 docker build -t "$IMAGE_URI" .
@@ -765,6 +1009,15 @@ gcloud run jobs execute mutual-spec-telemetry-init-tables \
   --region="$REGION" \
   --project="$PROJECT_ID" \
   --wait
+```
+
+After deploy, verify the public service URL:
+
+```bash
+gcloud run services describe mutual-spec-console \
+  --region="$REGION" \
+  --project="$PROJECT_ID" \
+  --format="value(status.url)"
 ```
 
 The GitHub workflow `.github/workflows/deploy-telemetry.yml` does the same on
@@ -831,6 +1084,7 @@ Generated local files are ignored:
 - `.ruff_cache/`
 - `__pycache__/`
 - `app/.adk/`
+- `data/spanner_rag_ingest/`
 
 ## Design Notes
 
@@ -862,3 +1116,6 @@ See [DESIGN_SPEC.md](DESIGN_SPEC.md) for the implementation contract, workflow r
 22. [Execute Cloud Run jobs on a schedule](https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule)
 23. [Workload Identity Federation with deployment pipelines](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines)
 24. [google-github-actions/setup-gcloud](https://github.com/google-github-actions/setup-gcloud)
+25. [Cloud Spanner full-text search](https://docs.cloud.google.com/spanner/docs/full-text-search)
+26. [Cloud Spanner vector search overview](https://docs.cloud.google.com/spanner/docs/vector-search-overview)
+27. [Cloud Spanner hybrid full-text and vector search](https://docs.cloud.google.com/spanner/docs/hybrid-full-text-vector-search)

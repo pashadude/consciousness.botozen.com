@@ -162,3 +162,7 @@ def test_physical_commodity_offer_builds_trader_decision_frame() -> None:
     assert any("commodity offer is executable" in item for item in ledger.latent_intent_hypotheses)
     assert any("Physical commodity offers" in item for item in ledger.evidence_contract)
     assert any("product spec" in item.lower() for item in ledger.verification_conditions)
+    assert ledger.search_plan
+    assert any("Umm Qasr" in item.query for item in ledger.search_plan)
+    assert any("Price benchmark" in item.purpose for item in ledger.search_plan)
+    assert any(source.name == "model_hypothesis" for source in ledger.evidence_sources)

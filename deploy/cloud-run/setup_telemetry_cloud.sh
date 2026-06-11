@@ -18,6 +18,8 @@ PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format="value(proje
 gcloud services enable \
   artifactregistry.googleapis.com \
   run.googleapis.com \
+  aiplatform.googleapis.com \
+  spanner.googleapis.com \
   cloudscheduler.googleapis.com \
   iamcredentials.googleapis.com \
   sts.googleapis.com \
@@ -25,6 +27,7 @@ gcloud services enable \
   bigquery.googleapis.com \
   pubsub.googleapis.com \
   monitoring.googleapis.com \
+  secretmanager.googleapis.com \
   --project "${PROJECT_ID}"
 
 gcloud artifacts repositories describe "${AR_REPOSITORY}" \
@@ -60,7 +63,10 @@ done
 for role in \
   roles/bigquery.dataViewer \
   roles/bigquery.jobUser \
-  roles/storage.objectCreator; do
+  roles/aiplatform.user \
+  roles/spanner.databaseReader \
+  roles/storage.objectCreator \
+  roles/secretmanager.secretAccessor; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
     --member="serviceAccount:${CONSOLE_RUNTIME_SA}" \
     --role="${role}" \
@@ -127,4 +133,13 @@ GCP_DEPLOYER_SERVICE_ACCOUNT=${GITHUB_DEPLOYER_SA}
 TELEMETRY_RUNTIME_SERVICE_ACCOUNT=${TELEMETRY_RUNTIME_SA}
 TELEMETRY_SCHEDULER_SERVICE_ACCOUNT=${TELEMETRY_SCHEDULER_SA}
 CONSOLE_RUNTIME_SERVICE_ACCOUNT=${CONSOLE_RUNTIME_SA}
+TRADER_SOURCE_LAYER_CONFIG=config/trader_source_layer.yaml
+TRADER_RAG_PROVIDER=spanner_rag
+GOOGLE_AGENT_SEARCH_ENABLED=true
+SPANNER_RAG_INSTANCE_ID=commodity-rag
+SPANNER_RAG_DATABASE_ID=trader_rag
+SPANNER_RAG_DOCUMENTS_TABLE=RagDocuments
+SPANNER_RAG_CHUNKS_TABLE=RagChunks
+SPANNER_RAG_EMBEDDING_MODEL=RagEmbeddingModel
+SPANNER_RAG_GCS_BUCKET=zenpulsar-spanner-rag-ingest
 EOF

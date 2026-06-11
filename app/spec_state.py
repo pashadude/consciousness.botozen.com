@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -27,12 +28,77 @@ class ArtifactRef(BaseModel):
 
 class EvidenceRef(BaseModel):
     evidence_id: str
-    source_type: Literal["artifact", "mcp", "web", "session", "user"]
+    source_type: Literal[
+        "artifact",
+        "google_agent_search",
+        "google_cse",
+        "mcp",
+        "model",
+        "rag",
+        "session",
+        "spanner_rag",
+        "user",
+        "vertex_ai_search",
+        "web",
+    ]
     title: str
     uri: str | None = None
     summary: str
     artifact_id: str | None = None
+    source_name: str | None = None
+    query: str | None = None
+    confidence: Literal["low", "medium", "high"] = "medium"
     used: bool = False
+
+
+class SearchPlanItem(BaseModel):
+    """Evidence retrieval obligation created from the inferred trader spec."""
+
+    query_id: str
+    query: str
+    purpose: str
+    required: bool = True
+    preferred_sources: list[
+        Literal[
+            "google_agent_search",
+            "google_cse",
+            "mcp",
+            "model",
+            "opoint",
+            "spanner_rag",
+            "vertex_ai_search",
+        ]
+    ] = Field(default_factory=list)
+    status: Literal["planned", "searched", "satisfied", "failed"] = "planned"
+
+
+class EvidenceSourceStatus(BaseModel):
+    """Provider status for source adapters that can satisfy SearchPlanItem rows."""
+
+    source_type: Literal[
+        "artifact",
+        "google_agent_search",
+        "google_cse",
+        "mcp",
+        "model",
+        "rag",
+        "spanner_rag",
+        "vertex_ai_search",
+        "web",
+    ]
+    name: str
+    status: Literal[
+        "configured",
+        "missing_config",
+        "planned",
+        "queried",
+        "retrieved",
+        "failed",
+        "skipped",
+    ]
+    detail: str
+    confidence: Literal["low", "medium", "high"] = "low"
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class Ambiguity(BaseModel):
@@ -129,6 +195,8 @@ class SpecLedger(BaseModel):
     clarification_questions: list[str] = Field(default_factory=list)
     clarification_answers: list[str] = Field(default_factory=list)
     artifact_refs: list[ArtifactRef] = Field(default_factory=list)
+    search_plan: list[SearchPlanItem] = Field(default_factory=list)
+    evidence_sources: list[EvidenceSourceStatus] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
     evidence_used: list[str] = Field(default_factory=list)
     route_history: list[RouteRecord] = Field(default_factory=list)
@@ -419,6 +487,7 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
         "IBKR may be used for futures history and market data only; do not place orders or expose broker execution.",
         "Yahoo Finance may be used only as a proxy/reference source and must carry calibration assumptions.",
         "Commodity feeds must record freshness, entitlement, units, transform, confidence, and lookahead guard.",
+        "Search/tool evidence must be retrieved through Google Agent SDK search tools, MCP/Opoint, Google CSE/RAG, Vertex AI Search, or explicitly marked model-only evidence before market claims are trusted.",
         "Physical commodity offers must verify product specification, quantity tolerance, Incoterms, load port, laycan, counterparty identity, title chain, payment terms, sanctions exposure, freight, insurance, inspection, and resale path.",
     ):
         add_unique(ledger.evidence_contract, item)
@@ -444,6 +513,7 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
         "Output separates immediate answer, required verification, hidden risks, economics, logistics, and go/no-go gate.",
     ):
         add_unique(ledger.success_criteria, item)
+    plan_trader_evidence_search(ledger, text)
 
 
 def looks_like_trader_query(text: str) -> bool:
@@ -493,7 +563,253 @@ def add_unique(values: list[str], item: str) -> None:
         values.append(item)
 
 
+def plan_trader_evidence_search(ledger: SpecLedger, text: str) -> SpecLedger:
+    """Attach evidence search obligations for compressed trader queries."""
+
+    if not looks_like_trader_query(text):
+        return ledger
+    lower = text.lower()
+    required = trader_required_evidence(lower)
+    queries = trader_search_queries(lower)
+    for index, (query, purpose) in enumerate(zip(queries, required, strict=False), start=1):
+        add_search_plan_item(
+            ledger,
+            query=query,
+            purpose=purpose,
+            query_id=f"trader:{stable_id(query)}:{index}",
+        )
+    for purpose in required:
+        add_unique(ledger.verification_conditions, purpose)
+    record_evidence_source(
+        ledger,
+        EvidenceSourceStatus(
+            source_type="model",
+            name="model_hypothesis",
+            status="planned",
+            detail=(
+                "Model reasoning may propose hypotheses, but market facts need "
+                "search/tool evidence before the gate can clear."
+            ),
+            confidence="low",
+        ),
+    )
+    return ledger
+
+
+def trader_required_evidence(lower_text: str) -> list[str]:
+    base = [
+        "Price benchmark and market context near the offer date.",
+        "Product specification, grade, quantity tolerance, and inspection standard.",
+        "Counterparty identity, title chain, documents, and payment terms.",
+        "Port/loading terms, laycan, berth constraints, demurrage, freight, and insurance.",
+        "Sanctions, compliance, route, bankability, and political risk.",
+        "Resale path, buyer demand, hedge/proxy availability, and netback economics.",
+    ]
+    if "sulfur" in lower_text or "sulphur" in lower_text:
+        return base
+    return base[:4]
+
+
+def trader_search_queries(lower_text: str) -> list[str]:
+    if "sulfur" in lower_text or "sulphur" in lower_text:
+        return [
+            '"sulfur" "Umm Qasr" FOB price',
+            '"Iraq" sulfur export "Umm Qasr"',
+            '"sulfur" market price Middle East FOB',
+            '"Umm Qasr" port sulfur cargo loading inspection',
+            '"Iraq" "Umm Qasr" sanctions shipping payment sulfur',
+            '"sulfur" 50000 tonnes FOB offer counterparty risk',
+        ]
+    terms = extract_trader_search_terms(lower_text)
+    base = " ".join(terms[:5]) or "commodity offer"
+    return [
+        f"{base} market price benchmark",
+        f"{base} logistics freight port risk",
+        f"{base} counterparty payment terms sanctions",
+        f"{base} specification inspection documents",
+    ]
+
+
+def extract_trader_search_terms(lower_text: str) -> list[str]:
+    candidates = (
+        "brent",
+        "wti",
+        "rbob",
+        "ulsd",
+        "sulfur",
+        "sulphur",
+        "iraq",
+        "umm qasr",
+        "fob",
+        "cfr",
+        "cargo",
+        "freight",
+        "counterparty",
+        "sanctions",
+    )
+    return [term for term in candidates if term in lower_text]
+
+
+def add_search_plan_item(
+    ledger: SpecLedger,
+    *,
+    query: str,
+    purpose: str,
+    query_id: str | None = None,
+    preferred_sources: list[
+        Literal[
+            "google_agent_search",
+            "google_cse",
+            "mcp",
+            "model",
+            "opoint",
+            "spanner_rag",
+            "vertex_ai_search",
+        ]
+    ]
+    | None = None,
+) -> SearchPlanItem:
+    item = SearchPlanItem(
+        query_id=query_id or f"search:{stable_id(query)}",
+        query=query,
+        purpose=purpose,
+        preferred_sources=preferred_sources
+        or [
+            "google_agent_search",
+            "mcp",
+            "google_cse",
+            "opoint",
+            "spanner_rag",
+            "vertex_ai_search",
+            "model",
+        ],
+    )
+    for index, existing in enumerate(ledger.search_plan):
+        if existing.query_id == item.query_id or existing.query == item.query:
+            ledger.search_plan[index] = existing.model_copy(
+                update={
+                    "purpose": item.purpose,
+                    "preferred_sources": item.preferred_sources,
+                }
+            )
+            return ledger.search_plan[index]
+    ledger.search_plan.append(item)
+    return item
+
+
+def record_evidence_source(
+    ledger: SpecLedger,
+    source: EvidenceSourceStatus,
+) -> SpecLedger:
+    for index, existing in enumerate(ledger.evidence_sources):
+        if existing.source_type == source.source_type and existing.name == source.name:
+            ledger.evidence_sources[index] = source
+            return ledger
+    ledger.evidence_sources.append(source)
+    return ledger
+
+
+def add_external_evidence(
+    ledger: SpecLedger,
+    *,
+    source_type: Literal[
+        "google_agent_search",
+        "google_cse",
+        "mcp",
+        "model",
+        "rag",
+        "spanner_rag",
+        "vertex_ai_search",
+        "web",
+    ],
+    title: str,
+    summary: str,
+    uri: str | None = None,
+    source_name: str | None = None,
+    query: str | None = None,
+    confidence: Literal["low", "medium", "high"] = "medium",
+    used: bool = True,
+) -> EvidenceRef:
+    key = uri or f"{source_type}:{source_name or title}:{summary[:120]}"
+    evidence = EvidenceRef(
+        evidence_id=f"{source_type}:{stable_id(key)}",
+        source_type=source_type,
+        title=title[:180] or source_type,
+        uri=uri,
+        summary=summary[:1500],
+        source_name=source_name,
+        query=query,
+        confidence=confidence,
+        used=used,
+    )
+    for index, existing in enumerate(ledger.evidence):
+        if existing.evidence_id == evidence.evidence_id:
+            ledger.evidence[index] = evidence
+            refresh_evidence_used(ledger)
+            return ledger.evidence[index]
+    ledger.evidence.append(evidence)
+    satisfy_search_plan_from_query(ledger, query)
+    refresh_evidence_used(ledger)
+    return evidence
+
+
+def add_model_evidence_summary(
+    ledger: SpecLedger,
+    *,
+    model_name: str,
+    summary: str,
+    query: str | None = None,
+) -> EvidenceRef:
+    record_evidence_source(
+        ledger,
+        EvidenceSourceStatus(
+            source_type="model",
+            name=model_name,
+            status="retrieved",
+            detail="Model-generated evidence summary; use as hypothesis unless grounded by search/tool evidence.",
+            confidence="low",
+        ),
+    )
+    return add_external_evidence(
+        ledger,
+        source_type="model",
+        title=f"Model evidence summary from {model_name}",
+        summary=summary,
+        uri=f"model://{model_name}",
+        source_name=model_name,
+        query=query,
+        confidence="low",
+    )
+
+
+def satisfy_search_plan_from_query(ledger: SpecLedger, query: str | None) -> None:
+    if not query:
+        return
+    for index, item in enumerate(ledger.search_plan):
+        if item.query == query:
+            ledger.search_plan[index] = item.model_copy(update={"status": "satisfied"})
+
+
+def refresh_evidence_used(ledger: SpecLedger) -> None:
+    ledger.evidence_used = sorted({item.evidence_id for item in ledger.evidence if item.used})
+
+
+def stable_id(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:12]
+
+
 def add_evidence_from_artifacts(ledger: SpecLedger) -> SpecLedger:
+    if ledger.artifact_refs:
+        record_evidence_source(
+            ledger,
+            EvidenceSourceStatus(
+                source_type="artifact",
+                name="adk_artifacts",
+                status="retrieved",
+                detail=f"{len(ledger.artifact_refs)} artifact reference(s) available.",
+                confidence="medium",
+            ),
+        )
     for artifact in ledger.artifact_refs:
         evidence_id = f"artifact:{artifact.artifact_id}"
         if any(item.evidence_id == evidence_id for item in ledger.evidence):
@@ -507,15 +823,27 @@ def add_evidence_from_artifacts(ledger: SpecLedger) -> SpecLedger:
                 summary=f"Uploaded artifact metadata: {artifact.filename}"
                 + (f" ({artifact.mime_type})" if artifact.mime_type else ""),
                 artifact_id=artifact.artifact_id,
+                source_name="adk_artifacts",
+                confidence="medium",
                 used=True,
             )
         )
-    ledger.evidence_used = sorted({item.evidence_id for item in ledger.evidence if item.used})
+    refresh_evidence_used(ledger)
     return ledger
 
 
 def add_mcp_evidence_placeholder(ledger: SpecLedger, source_uri: str) -> SpecLedger:
-    evidence_id = f"mcp:{abs(hash(source_uri))}"
+    record_evidence_source(
+        ledger,
+        EvidenceSourceStatus(
+            source_type="mcp",
+            name="configured_mcp_research",
+            status="configured",
+            detail=source_uri,
+            confidence="medium",
+        ),
+    )
+    evidence_id = f"mcp:{stable_id(source_uri)}"
     if not any(item.evidence_id == evidence_id for item in ledger.evidence):
         ledger.evidence.append(
             EvidenceRef(
@@ -524,8 +852,10 @@ def add_mcp_evidence_placeholder(ledger: SpecLedger, source_uri: str) -> SpecLed
                 title="Configured MCP research source",
                 uri=source_uri,
                 summary="External evidence retrieval is configured through an MCP toolset.",
+                source_name="configured_mcp_research",
+                confidence="medium",
                 used=True,
             )
         )
-    ledger.evidence_used = sorted({item.evidence_id for item in ledger.evidence if item.used})
+    refresh_evidence_used(ledger)
     return ledger
