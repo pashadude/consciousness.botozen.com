@@ -653,8 +653,14 @@ def choose_mcp_search_tool(tool_names: list[str]) -> str | None:
 def mcp_search_arguments(tool_name: str, *, query: str, limit: int) -> dict[str, Any]:
     lowered = tool_name.lower()
     if "article" in lowered or "opoint" in lowered or lowered.startswith("search_"):
-        return {"search_text": query, "num_articles": limit}
+        return {"search_text": opoint_query_text(query), "num_articles": limit}
     return {"query": query, "limit": limit}
+
+
+def opoint_query_text(query: str) -> str:
+    cleaned = query.replace('"', " ")
+    cleaned = re.sub(r"\b(AND|OR|NOT)\b", " ", cleaned, flags=re.IGNORECASE)
+    return " ".join(cleaned.split()) or query
 
 
 def extract_mcp_error(call_result: Any) -> str:
@@ -688,10 +694,8 @@ def records_from_mcp_payload(payload: Any) -> list[Mapping[str, Any]]:
         return [item for item in payload if isinstance(item, Mapping)]
     if isinstance(payload, Mapping):
         for key in ("results", "articles", "documents", "items", "data", "result"):
-            nested = payload.get(key)
-            records = records_from_mcp_payload(nested)
-            if records:
-                return records
+            if key in payload:
+                return records_from_mcp_payload(payload.get(key))
         return [payload]
     return []
 

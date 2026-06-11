@@ -6,6 +6,8 @@ from app.trader_rag import (
     SearchEvidence,
     apply_rag_to_ledger,
     load_trader_source_config,
+    mcp_search_arguments,
+    records_from_mcp_payload,
     run_async_mcp,
     run_trader_rag,
     spanner_scan_terms,
@@ -212,6 +214,21 @@ def test_run_async_mcp_inside_active_event_loop() -> None:
         return run_async_mcp(value())
 
     assert asyncio.run(inside_loop()) == "ok"
+
+
+def test_mcp_empty_result_wrapper_is_not_evidence() -> None:
+    assert records_from_mcp_payload({"result": []}) == []
+    assert records_from_mcp_payload({"results": []}) == []
+
+
+def test_opoint_mcp_search_arguments_strip_boolean_quotes() -> None:
+    args = mcp_search_arguments(
+        "search_site_and_articles",
+        query='"sulfur" "Umm Qasr" FOB price',
+        limit=5,
+    )
+
+    assert args == {"search_text": "sulfur Umm Qasr FOB price", "num_articles": 5}
 
 
 def test_joined_spanner_and_mcp_provider_merges_evidence(monkeypatch) -> None:
