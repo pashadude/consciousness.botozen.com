@@ -6,6 +6,7 @@ from app.spec_state import (
     build_clarification_question,
     needs_clarification,
     record_stage,
+    run_lean_formal_proofs,
     update_ledger_from_user_text,
 )
 from app.verifiers import (
@@ -176,6 +177,10 @@ def test_physical_commodity_offer_builds_trader_decision_frame() -> None:
     assert any(item.stage_id == "proof_obligations" for item in ledger.game_states)
     assert ledger.equilibrium_diagnostics.recommended_action == "review"
     assert ledger.equilibrium_diagnostics.payoffs
+    assert ledger.formal_proofs.backend == "lean"
+    assert ledger.formal_proofs.checks
+    assert any(item.theorem_name == "no_finalize_when_needs_more_info" for item in ledger.formal_proofs.checks)
+    assert any(item.stage_id == "formal_proofs" for item in ledger.game_states)
     assert ledger.skill_compatibility.inferred_role == "commodity trader"
     assert ledger.skill_compatibility.handoff_format == "review_packet"
     assert ledger.skill_compatibility.next_best_action == "review"
@@ -210,3 +215,23 @@ def test_mutual_spec_game_state_is_materialized_from_query() -> None:
     assert ledger.user_endorsement.endorsed_fields
     assert ledger.skill_compatibility.handoff_format == "implementation_plan"
     assert ledger.spec_convergence.overall > 0
+
+
+def test_lean_bridge_generates_only_gate_invariants(monkeypatch) -> None:
+    monkeypatch.setattr("app.spec_state.shutil.which", lambda name: None)
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "Look i have an offer of 50000 tonns of sulfur in Iraq, Umm Qasr, fob 550, should i go for it?",
+    )
+
+    state = run_lean_formal_proofs(ledger)
+    lean_code = "\n".join(item.lean_code for item in state.checks).lower()
+
+    assert state.backend == "lean"
+    assert state.status == "unavailable"
+    assert state.checks
+    assert "finalizeallowed" in lean_code
+    assert "no_finalize_when_needs_more_info" in lean_code
+    assert "sulfur" not in lean_code
+    assert "umm qasr" not in lean_code

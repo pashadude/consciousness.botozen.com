@@ -54,6 +54,7 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
     claim_graph_lines = format_claim_graph_lines(ledger)
     proof_obligation_lines = format_proof_obligation_lines(ledger)
     equilibrium_lines = format_equilibrium_lines(ledger)
+    formal_proof_lines = format_formal_proof_lines(ledger)
     human_review_lines = format_human_review_lines(ledger)
     skill_compatibility_lines = format_skill_compatibility_lines(ledger)
     verification_condition_lines = format_optional_lines(
@@ -110,6 +111,9 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
             "Equilibrium Diagnostics",
             equilibrium_lines,
             "",
+            "Formal Proof Checks",
+            formal_proof_lines,
+            "",
             "Human Review",
             human_review_lines,
             "",
@@ -152,7 +156,8 @@ def format_game_state_lines(ledger: SpecLedger) -> str:
         f"verification={convergence.verification_resolution:.2f}, "
         f"human_review={convergence.human_review_resolution:.2f}, "
         f"skill={convergence.skill_compatibility_resolution:.2f}, "
-        f"proof={convergence.proof_obligation_resolution:.2f})"
+        f"proof={convergence.proof_obligation_resolution:.2f}, "
+        f"formal_proof={convergence.formal_proof_resolution:.2f})"
     )
     return "\n".join(lines)
 
@@ -218,6 +223,24 @@ def format_equilibrium_lines(ledger: SpecLedger) -> str:
             *payoff_lines,
         ]
     )
+
+
+def format_formal_proof_lines(ledger: SpecLedger) -> str:
+    proofs = ledger.formal_proofs
+    lines = [
+        f"- backend: {proofs.backend}",
+        f"- status: {proofs.status}",
+        f"- executable_path: {proofs.executable_path or 'unavailable'}",
+        f"- scope: {proofs.scope}",
+    ]
+    if not proofs.checks:
+        lines.append("- checks: none")
+        return "\n".join(lines)
+    for item in proofs.checks[:8]:
+        lines.append(
+            f"- [{item.check_id}] {item.theorem_name}/{item.status}: {item.statement}"
+        )
+    return "\n".join(lines)
 
 
 def format_human_review_lines(ledger: SpecLedger) -> str:

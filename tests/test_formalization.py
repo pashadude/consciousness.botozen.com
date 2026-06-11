@@ -99,11 +99,13 @@ def test_mutual_specification_game_formalization_checks_architecture_obligations
     assert "claim_graph" in record.answer["obligations"]
     assert "proof_obligations" in record.answer["obligations"]
     assert "equilibrium_diagnostics" in record.answer["obligations"]
+    assert "lean_formal_bridge" in record.answer["obligations"]
     assert "human_review_gate" in record.answer["obligations"]
     assert "skill_compatible_handoff" in record.answer["obligations"]
     assert record.hypothesis["human_review"]["assigned_player"] == "human_reviewer"
     assert record.hypothesis["skill_compatibility"]["handoff_format"] == "implementation_plan"
     assert record.hypothesis["equilibrium_diagnostics"]["recommended_action"]
+    assert record.hypothesis["formal_proofs"]["backend"] == "lean"
 
 
 def test_verifier_blocks_ready_gate_when_formal_obligations_are_missing() -> None:

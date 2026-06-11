@@ -34,6 +34,7 @@ from app.spec_state import (
     add_evidence_from_artifacts,
     add_route,
     record_stage,
+    run_lean_formal_proofs,
     update_ledger_from_user_text,
     update_mutual_spec_game_state,
 )
@@ -137,6 +138,7 @@ async def create_spec_json(
             "equilibrium_diagnostics": result.ledger.equilibrium_diagnostics.model_dump(
                 mode="json"
             ),
+            "formal_proofs": result.ledger.formal_proofs.model_dump(mode="json"),
             "frontier": [candidate.key for candidate in result.candidates if candidate.key in result.frontier_keys],
             "source_layer": {
                 "provider": result.rag_result.provider,
@@ -209,6 +211,9 @@ def build_console_result(
             else "clarifying"
         )
     update_mutual_spec_game_state(ledger)
+    if flag_enabled("LEAN_PROOF_CHECKS_ENABLED"):
+        run_lean_formal_proofs(ledger)
+        update_mutual_spec_game_state(ledger)
     candidates = sample_route_candidates(os.environ)
     frontier_keys = {candidate.key for candidate in nondominated_candidates(candidates)}
     return ConsoleResult(
@@ -380,6 +385,7 @@ def render_workspace(
     {render_game_panel(result)}
     {render_proof_obligations_panel(result)}
     {render_equilibrium_panel(result)}
+    {render_formal_proof_panel(result)}
     {render_source_layer_panel(result)}
     {render_answer_panel(result)}
     {render_spec_panel(result)}
@@ -603,6 +609,34 @@ def render_equilibrium_panel(result: ConsoleResult) -> str:
     <summary>Conflicts</summary>
     {conflicts}
   </details>
+</section>
+"""
+
+
+def render_formal_proof_panel(result: ConsoleResult) -> str:
+    proofs = result.ledger.formal_proofs
+    rows = "\n".join(
+        f"""
+<li class="{escape(item.status)}">
+  <strong>{escape(item.theorem_name)} / {escape(item.status)}</strong>
+  <span>{escape(item.check_id)}</span>
+  <p>{escape(item.statement)}</p>
+</li>
+"""
+        for item in proofs.checks[:8]
+    ) or "<li><span>No formal Lean checks apply.</span></li>"
+    return f"""
+<section class="panel formal-proof-panel">
+  <div class="panel-title">
+    <h2>Formal Proof Checks</h2>
+    <span class="pill {proof_status_class(proofs.status)}">{escape(proofs.status)}</span>
+  </div>
+  <p class="subtle">{escape(proofs.scope)}</p>
+  <dl class="kv">
+    <dt>backend</dt><dd>{escape(proofs.backend)}</dd>
+    <dt>lean</dt><dd>{escape(proofs.executable_path or 'unavailable')}</dd>
+  </dl>
+  <ul class="source-list">{rows}</ul>
 </section>
 """
 
@@ -1000,6 +1034,16 @@ def review_status_class(status: str) -> str:
         "in_review": "warn",
         "changes_requested": "warn",
         "rejected": "warn",
+    }.get(status, "info")
+
+
+def proof_status_class(status: str) -> str:
+    return {
+        "checked": "ok",
+        "not_applicable": "ok",
+        "generated": "info",
+        "unavailable": "warn",
+        "failed": "warn",
     }.get(status, "info")
 
 

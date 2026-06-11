@@ -75,6 +75,7 @@ def test_console_api_accepts_speech_text_and_audio(tmp_path, monkeypatch) -> Non
         "finalize",
         "defer",
     }
+    assert payload["formal_proofs"]["backend"] == "lean"
 
 
 def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:
@@ -99,6 +100,7 @@ def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) ->
     assert "Skill Compatibility" in response.text
     assert "Proof Obligations" in response.text
     assert "Equilibrium Diagnostics" in response.text
+    assert "Formal Proof Checks" in response.text
     assert "&quot;sulfur&quot; &quot;Umm Qasr&quot; FOB price" in response.text
     assert "Provisional Decision Frame" in response.text
     assert "not go-ready" in response.text

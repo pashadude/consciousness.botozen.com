@@ -274,6 +274,7 @@ class MutualSpecificationGameTask(FormalizationTask):
         "claim_graph": "Transform response content into claims with support, dependencies, and verifier state.",
         "proof_obligations": "Condense unsupported claims, evidence gaps, formal gaps, and review gaps into verifier work items.",
         "equilibrium_diagnostics": "Expose multicriteria action dominance instead of silently choosing the next move.",
+        "lean_formal_bridge": "Generate Lean-only checks for narrow logical gate invariants while leaving empirical claims to evidence obligations.",
         "convergence_metric": "Score convergence between latent intent, expressed query, and executable specification.",
         "human_review_gate": "Build a reviewer packet for high-stakes or blocked specs before decision-ready output.",
         "skill_compatible_handoff": "Track what the user can verify and what handoff format preserves user agency.",
@@ -315,6 +316,7 @@ class MutualSpecificationGameTask(FormalizationTask):
                 item.model_dump(mode="json") for item in ledger.proof_obligations
             ],
             "equilibrium_diagnostics": ledger.equilibrium_diagnostics.model_dump(mode="json"),
+            "formal_proofs": ledger.formal_proofs.model_dump(mode="json"),
             "human_review": ledger.human_review.model_dump(mode="json"),
             "skill_compatibility": ledger.skill_compatibility.model_dump(mode="json"),
             "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
@@ -364,6 +366,9 @@ class MutualSpecificationGameTask(FormalizationTask):
             "proof_obligations": bool(hypothesis.get("proof_obligations") is not None),
             "equilibrium_diagnostics": bool(
                 hypothesis.get("equilibrium_diagnostics", {}).get("recommended_action")
+            ),
+            "lean_formal_bridge": bool(
+                hypothesis.get("formal_proofs", {}).get("backend") == "lean"
             ),
             "convergence_metric": bool(hypothesis.get("spec_convergence", {}).get("overall") is not None),
             "human_review_gate": bool(

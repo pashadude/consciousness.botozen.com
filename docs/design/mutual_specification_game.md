@@ -58,6 +58,7 @@ not only as prose in the prompt.
 | `claim_graph` | Proof-carrying response | Claims are typed as fact, assumption, inference, constraint, or decision gate and carry support IDs plus verifier state. |
 | `proof_obligations` | Proof-carrying response | Evidence gaps, unsupported claims, missing formal obligations, review approvals, artifact inspections, and verifier findings become explicit work items. |
 | `equilibrium_diagnostics` | Multicriteria domination | Candidate next actions are scored by specification gain, risk reduction, user burden, latency, and policy penalty; dominated actions are marked. |
+| `formal_proofs` | Lean / proof assistant bridge | Lean-only checks are generated for narrow gate invariants, such as "do not finalize while hard gates remain." |
 | `user_endorsement` | Anti-revealed-preference guard | Resolved, pending, and rejected fields are tracked separately from mere user engagement. |
 | `human_review` | Skill-compatible human-AI collaboration | High-stakes or blocked specs produce a reviewer packet with risk, reasons, blocking claims, blocking evidence, and approval conditions. |
 | `skill_compatibility` | Designing skill-compatible AI | The agent records inferred role, skill level, cognitive burden, handoff format, compatibility risks, and next action. |
@@ -87,7 +88,15 @@ Priority 3 is implemented as `SpecLedger.proof_obligations` plus the console's
 Proof Obligations panel. Priority 4 is implemented as
 `SpecLedger.equilibrium_diagnostics` plus the console's Equilibrium Diagnostics
 panel. This is a multicriteria action-dominance diagnostic, not a full
-equilibrium solver. The skill state is currently deterministic and
+equilibrium solver. Priority 5 is implemented as `SpecLedger.formal_proofs`
+plus the console's Formal Proof Checks panel. The Lean bridge generates checks
+for narrow logical gate invariants and can execute them when `lean` is installed
+and `LEAN_PROOF_CHECKS_ENABLED=true`.
+
+The Lean bridge deliberately does not prove market, logistics, sanctions,
+counterparty, title-chain, document, or electricity-proxy claims. Those remain
+empirical proof obligations that need evidence, source freshness, inspection,
+review, or explicit waiver. The skill state is currently deterministic and
 learner-ready; it does not yet train from historical reviewer/user outcomes.
 
 ## Formalization Task Contract

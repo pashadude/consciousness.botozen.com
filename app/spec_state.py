@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import subprocess
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -13,6 +17,19 @@ from pydantic import BaseModel, Field
 STATE_KEY = "spec_ledger"
 MAX_TRACE_STEPS = 80
 MATERIAL_FIELDS: tuple[str, ...] = ("goal", "audience", "output_format")
+LEAN_PROOF_PREAMBLE = """\
+structure SpecGate where
+  needsMoreInfo : Prop
+  openProofs : Prop
+  humanReviewRequired : Prop
+  highSeverityFindings : Prop
+
+def finalizeAllowed (g : SpecGate) : Prop :=
+  Not g.needsMoreInfo
+  ∧ Not g.openProofs
+  ∧ Not g.humanReviewRequired
+  ∧ Not g.highSeverityFindings
+"""
 
 
 class ArtifactRef(BaseModel):
@@ -220,6 +237,53 @@ class EquilibriumDiagnosticState(BaseModel):
     rationale: str = ""
 
 
+class FormalProofCheckRecord(BaseModel):
+    """Optional Lean check for a narrow formal gate invariant."""
+
+    check_id: str
+    backend: Literal["lean"] = "lean"
+    theorem_name: str
+    source_type: Literal[
+        "decision_gate",
+        "proof_obligations",
+        "human_review",
+        "verifier_findings",
+        "gate_clear",
+    ]
+    source_id: str
+    statement: str
+    status: Literal[
+        "not_applicable",
+        "generated",
+        "checked",
+        "failed",
+        "unavailable",
+        "skipped",
+    ] = "generated"
+    lean_code: str
+    output: str | None = None
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class FormalProofAssistantState(BaseModel):
+    """Lean-only bridge for formal, non-empirical proof checks."""
+
+    backend: Literal["lean"] = "lean"
+    scope: str = (
+        "Lean checks only narrow logical gate invariants. Market, logistics, "
+        "sanctions, counterparty, and document claims remain empirical proof obligations."
+    )
+    status: Literal[
+        "not_applicable",
+        "unavailable",
+        "generated",
+        "checked",
+        "failed",
+    ] = "not_applicable"
+    executable_path: str | None = None
+    checks: list[FormalProofCheckRecord] = Field(default_factory=list)
+
+
 class UserEndorsementState(BaseModel):
     """Whether the user has endorsed the current shared specification."""
 
@@ -287,6 +351,7 @@ class SpecConvergenceState(BaseModel):
     human_review_resolution: float = 0.0
     skill_compatibility_resolution: float = 0.0
     proof_obligation_resolution: float = 0.0
+    formal_proof_resolution: float = 0.0
     overall: float = 0.0
     status: Literal["diverged", "negotiating", "executable", "verified"] = "diverged"
 
@@ -383,6 +448,7 @@ class SpecLedger(BaseModel):
     equilibrium_diagnostics: EquilibriumDiagnosticState = Field(
         default_factory=EquilibriumDiagnosticState
     )
+    formal_proofs: FormalProofAssistantState = Field(default_factory=FormalProofAssistantState)
     user_endorsement: UserEndorsementState = Field(default_factory=UserEndorsementState)
     human_review: HumanReviewState = Field(default_factory=HumanReviewState)
     skill_compatibility: SkillCompatibilityState = Field(default_factory=SkillCompatibilityState)
@@ -435,7 +501,8 @@ def update_mutual_spec_game_state(ledger: SpecLedger) -> SpecLedger:
 
     This is deliberately deterministic: it gives the model and verifier an
     inspectable state object rather than hiding the specification game in a
-    prompt. It is not an equilibrium solver or a theorem prover.
+    prompt. It is not a full equilibrium solver and only runs an external
+    Lean theorem prover when explicitly requested through the console path.
     """
 
     ensure_game_players(ledger)
@@ -447,6 +514,7 @@ def update_mutual_spec_game_state(ledger: SpecLedger) -> SpecLedger:
     sync_skill_compatibility_state(ledger)
     sync_proof_obligations(ledger)
     sync_equilibrium_diagnostics(ledger)
+    sync_formal_proof_checks(ledger)
     ledger.game_states = build_game_states(ledger)
     ledger.spec_convergence = compute_spec_convergence(ledger)
     return ledger
@@ -801,6 +869,34 @@ def build_game_states(ledger: SpecLedger) -> list[GameStageState]:
             blocking_conditions=review_blocks,
         )
     )
+    proof_status = ledger.formal_proofs.status
+    if proof_status == "failed":
+        formal_proof_status = "blocked"
+        proof_blocks = [
+            item.theorem_name
+            for item in ledger.formal_proofs.checks
+            if item.status == "failed"
+        ]
+    elif proof_status in {"checked", "not_applicable"}:
+        formal_proof_status = "satisfied"
+        proof_blocks = []
+    else:
+        formal_proof_status = "active"
+        proof_blocks = [
+            "Lean executable is unavailable; generated checks are inspectable but not machine-checked."
+            if proof_status == "unavailable"
+            else "Lean checks are generated but not executed."
+        ]
+    states.append(
+        GameStageState(
+            stage_id="formal_proofs",
+            game_type="lean_gate_invariant_game",
+            objective="Machine-check narrow logical gate invariants when Lean is available.",
+            success_condition="Lean checks pass or no formal gate invariant applies.",
+            status=formal_proof_status,
+            blocking_conditions=proof_blocks[:8],
+        )
+    )
     return states
 
 
@@ -1145,6 +1241,222 @@ def sync_equilibrium_diagnostics(ledger: SpecLedger) -> None:
     )
 
 
+def sync_formal_proof_checks(ledger: SpecLedger) -> None:
+    """Generate Lean checks for formal gate invariants only.
+
+    This function never validates empirical market/logistics facts and does not
+    execute Lean. Call ``run_lean_formal_proofs`` when a Lean executable is
+    intentionally available.
+    """
+
+    previous_checks = {item.check_id: item for item in ledger.formal_proofs.checks}
+    checks = []
+    for item in build_formal_proof_checks(ledger):
+        previous = previous_checks.get(item.check_id)
+        if previous and previous.lean_code == item.lean_code and previous.status in {
+            "checked",
+            "failed",
+        }:
+            checks.append(previous)
+        else:
+            checks.append(item)
+    executable_path = shutil.which("lean")
+    if not checks:
+        status = "not_applicable"
+    elif executable_path:
+        if any(item.status == "failed" for item in checks):
+            status = "failed"
+        elif all(item.status == "checked" for item in checks):
+            status = "checked"
+        else:
+            status = "generated"
+    else:
+        status = "unavailable"
+        checks = [
+            item
+            if item.status in {"checked", "failed"}
+            else item.model_copy(update={"status": "unavailable"})
+            for item in checks
+        ]
+    ledger.formal_proofs = FormalProofAssistantState(
+        status=status,
+        executable_path=executable_path,
+        checks=checks,
+    )
+
+
+def build_formal_proof_checks(ledger: SpecLedger) -> list[FormalProofCheckRecord]:
+    checks: list[FormalProofCheckRecord] = []
+    open_proofs = any(
+        item.required and item.status not in {"satisfied", "waived"}
+        for item in ledger.proof_obligations
+    )
+    review_required = ledger.human_review.required and ledger.human_review.status != "approved"
+    high_findings = any(item.severity == "high" for item in ledger.verification_findings)
+    if ledger.decision_gate == "needs_more_info":
+        checks.append(
+            lean_check_record(
+                theorem_name="no_finalize_when_needs_more_info",
+                source_type="decision_gate",
+                source_id=ledger.decision_gate,
+                statement="A spec with decision_gate=needs_more_info cannot be finalized.",
+                theorem_body=(
+                    "theorem no_finalize_when_needs_more_info (g : SpecGate) :\n"
+                    "  g.needsMoreInfo -> Not (finalizeAllowed g) := by\n"
+                    "  intro h allowed\n"
+                    "  exact allowed.left h\n"
+                ),
+            )
+        )
+    if open_proofs:
+        checks.append(
+            lean_check_record(
+                theorem_name="no_finalize_with_open_proofs",
+                source_type="proof_obligations",
+                source_id="open_proof_obligations",
+                statement="A spec with open proof obligations cannot be finalized.",
+                theorem_body=(
+                    "theorem no_finalize_with_open_proofs (g : SpecGate) :\n"
+                    "  g.openProofs -> Not (finalizeAllowed g) := by\n"
+                    "  intro h allowed\n"
+                    "  exact allowed.right.left h\n"
+                ),
+            )
+        )
+    if review_required:
+        checks.append(
+            lean_check_record(
+                theorem_name="no_finalize_with_required_review",
+                source_type="human_review",
+                source_id=ledger.human_review.review_id,
+                statement="A spec requiring unapproved human review cannot be finalized.",
+                theorem_body=(
+                    "theorem no_finalize_with_required_review (g : SpecGate) :\n"
+                    "  g.humanReviewRequired -> Not (finalizeAllowed g) := by\n"
+                    "  intro h allowed\n"
+                    "  exact allowed.right.right.left h\n"
+                ),
+            )
+        )
+    if high_findings:
+        checks.append(
+            lean_check_record(
+                theorem_name="no_finalize_with_high_severity_findings",
+                source_type="verifier_findings",
+                source_id="high_severity_findings",
+                statement="A spec with high-severity verifier findings cannot be finalized.",
+                theorem_body=(
+                    "theorem no_finalize_with_high_severity_findings (g : SpecGate) :\n"
+                    "  g.highSeverityFindings -> Not (finalizeAllowed g) := by\n"
+                    "  intro h allowed\n"
+                    "  exact allowed.right.right.right h\n"
+                ),
+            )
+        )
+    if not (
+        ledger.decision_gate == "needs_more_info"
+        or open_proofs
+        or review_required
+        or high_findings
+    ):
+        checks.append(
+            lean_check_record(
+                theorem_name="finalize_allowed_when_no_hard_gates",
+                source_type="gate_clear",
+                source_id="all_hard_gates_clear",
+                statement="A spec can pass the formal finalize gate when no hard formal gates remain.",
+                theorem_body=(
+                    "theorem finalize_allowed_when_no_hard_gates (g : SpecGate) :\n"
+                    "  Not g.needsMoreInfo ->\n"
+                    "  Not g.openProofs ->\n"
+                    "  Not g.humanReviewRequired ->\n"
+                    "  Not g.highSeverityFindings ->\n"
+                    "  finalizeAllowed g := by\n"
+                    "  intro noNeeds noProofs noReview noFindings\n"
+                    "  exact And.intro noNeeds (And.intro noProofs (And.intro noReview noFindings))\n"
+                ),
+            )
+        )
+    return checks
+
+
+def lean_check_record(
+    *,
+    theorem_name: str,
+    source_type: str,
+    source_id: str,
+    statement: str,
+    theorem_body: str,
+) -> FormalProofCheckRecord:
+    lean_code = LEAN_PROOF_PREAMBLE + "\n\n" + theorem_body
+    return FormalProofCheckRecord(
+        check_id=f"lean:{stable_id(theorem_name + ':' + source_id)}",
+        theorem_name=theorem_name,
+        source_type=source_type,  # type: ignore[arg-type]
+        source_id=source_id,
+        statement=statement,
+        lean_code=lean_code,
+    )
+
+
+def run_lean_formal_proofs(ledger: SpecLedger) -> FormalProofAssistantState:
+    """Execute generated Lean checks when Lean is installed."""
+
+    if not ledger.formal_proofs.checks:
+        sync_formal_proof_checks(ledger)
+    executable_path = shutil.which("lean")
+    if not ledger.formal_proofs.checks:
+        ledger.formal_proofs = FormalProofAssistantState(
+            status="not_applicable",
+            executable_path=executable_path,
+            checks=[],
+        )
+        return ledger.formal_proofs
+    if not executable_path:
+        ledger.formal_proofs = ledger.formal_proofs.model_copy(
+            update={
+                "status": "unavailable",
+                "executable_path": None,
+                "checks": [
+                    item.model_copy(update={"status": "unavailable"})
+                    for item in ledger.formal_proofs.checks
+                ],
+            }
+        )
+        return ledger.formal_proofs
+
+    checked: list[FormalProofCheckRecord] = []
+    any_failed = False
+    with tempfile.TemporaryDirectory(prefix="mutual-spec-lean-") as tmp_dir:
+        for item in ledger.formal_proofs.checks:
+            path = Path(tmp_dir) / f"{item.theorem_name}.lean"
+            path.write_text(item.lean_code, encoding="utf-8")
+            try:
+                result = subprocess.run(
+                    [executable_path, path.as_posix()],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                output = (result.stdout + result.stderr).strip() or None
+                failed = result.returncode != 0
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                output = str(exc)
+                failed = True
+            if failed:
+                any_failed = True
+                checked.append(item.model_copy(update={"status": "failed", "output": output}))
+            else:
+                checked.append(item.model_copy(update={"status": "checked", "output": output}))
+    ledger.formal_proofs = FormalProofAssistantState(
+        status="failed" if any_failed else "checked",
+        executable_path=executable_path,
+        checks=checked,
+    )
+    return ledger.formal_proofs
+
+
 def mark_dominated_actions(payoffs: list[GameActionPayoff]) -> list[GameActionPayoff]:
     result: list[GameActionPayoff] = []
     for item in payoffs:
@@ -1359,15 +1671,25 @@ def compute_spec_convergence(ledger: SpecLedger) -> SpecConvergenceState:
         if required_proofs
         else 1.0
     )
+    formal_proof_status = ledger.formal_proofs.status
+    if formal_proof_status in {"not_applicable", "checked"}:
+        formal_proof = 1.0
+    elif formal_proof_status == "failed":
+        formal_proof = 0.0
+    elif formal_proof_status == "generated":
+        formal_proof = 0.65
+    else:
+        formal_proof = 0.55
     overall = round(
-        0.16 * material
-        + 0.16 * evidence
-        + 0.18 * formal
+        0.15 * material
+        + 0.15 * evidence
+        + 0.17 * formal
         + 0.08 * endorsement
         + 0.12 * verification
         + 0.10 * human_review
-        + 0.10 * skill
-        + 0.10 * proof,
+        + 0.09 * skill
+        + 0.09 * proof
+        + 0.05 * formal_proof,
         4,
     )
     if human_review == 0.0 and review_state.required:
@@ -1394,6 +1716,7 @@ def compute_spec_convergence(ledger: SpecLedger) -> SpecConvergenceState:
         human_review_resolution=round(human_review, 4),
         skill_compatibility_resolution=round(skill, 4),
         proof_obligation_resolution=round(proof, 4),
+        formal_proof_resolution=round(formal_proof, 4),
         overall=overall,
         status=status,
     )

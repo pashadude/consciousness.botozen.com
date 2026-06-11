@@ -216,6 +216,7 @@ def render_talk_record(record: Mapping[str, Any]) -> str:
         ("Claim graph", record.get("claim_graph")),
         ("Proof obligations", record.get("proof_obligations")),
         ("Equilibrium diagnostics", record.get("equilibrium_diagnostics")),
+        ("Formal proof checks", record.get("formal_proofs")),
         ("User endorsement", record.get("user_endorsement")),
         ("Human review", record.get("human_review")),
         ("Skill compatibility", record.get("skill_compatibility")),
