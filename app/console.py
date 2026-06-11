@@ -354,6 +354,9 @@ def render_page(
 
 
 def render_header(result: ConsoleResult) -> str:
+    gate_class = gate_status_class(result.ledger.decision_gate)
+    verify_class = "verified" if result.verification_passed else "blocked"
+    route_mode = str(getattr(result.route_decision, "mode", "sync"))
     return f"""
 <header class="topbar">
   <div>
@@ -362,8 +365,9 @@ def render_header(result: ConsoleResult) -> str:
   </div>
   <div class="status-strip">
     <span class="pill {status_class(result.ledger.status)}">{escape(result.ledger.status)}</span>
-    <span class="pill {'ok' if result.verification_passed else 'warn'}">verify {'pass' if result.verification_passed else 'open'}</span>
-    <span class="pill info">{escape(str(getattr(result.route_decision, 'mode', 'sync')))}</span>
+    <span class="pill {verify_class}">verify {'pass' if result.verification_passed else 'blocked'}</span>
+    <span class="pill {gate_class}">gate {escape(result.ledger.decision_gate)}</span>
+    <span class="pill {route_status_class(route_mode)}">{escape(route_mode)}</span>
   </div>
 </header>
 """
@@ -382,12 +386,12 @@ def render_workspace(
     {render_status_panel(env)}
   </section>
   <section class="center-rail">
+    {render_decision_summary_panel(result)}
     {render_game_panel(result)}
+    {render_source_layer_panel(result)}
     {render_proof_obligations_panel(result)}
     {render_equilibrium_panel(result)}
     {render_formal_proof_panel(result)}
-    {render_source_layer_panel(result)}
-    {render_answer_panel(result)}
     {render_spec_panel(result)}
     {render_frontier_panel(result)}
   </section>
@@ -407,7 +411,7 @@ def render_input_form(text: str) -> str:
 <form class="panel input-panel" method="post" action="/spec" enctype="multipart/form-data">
   <div class="panel-title">
     <h2>Task Signal</h2>
-    <button type="submit">Run Spec</button>
+    <button id="runSpec" type="submit">Run Spec</button>
   </div>
   <label for="query">Query</label>
   <textarea id="query" name="query" rows="8">{escape(text)}</textarea>
@@ -421,6 +425,41 @@ def render_input_form(text: str) -> str:
   </div>
   <p id="captureState" class="capture-state">idle</p>
 </form>
+"""
+
+
+def render_decision_summary_panel(result: ConsoleResult) -> str:
+    ledger = result.ledger
+    answer_lines = build_provisional_answer(result)
+    primary = answer_lines[0] if answer_lines else "No answer generated."
+    supporting = answer_lines[1:]
+    evidence_count = len(result.rag_result.evidence)
+    review = ledger.human_review
+    source_status = result.rag_result.status
+    summary_class = gate_status_class(ledger.decision_gate)
+    return f"""
+<section class="panel decision-panel {summary_class}" id="decisionPanel">
+  <div class="panel-title">
+    <div>
+      <h2>Answer First / Provisional Decision Frame</h2>
+      <p class="subtle">This is the operator answer. Ledgers below explain why.</p>
+    </div>
+    <div class="button-row">
+      <button type="button" id="copyAnswer">Copy Answer</button>
+      <button type="button" id="markReviewed">Mark Reviewed</button>
+    </div>
+  </div>
+  <div class="decision-callout">
+    <span class="decision-label">{escape(ledger.decision_gate)}</span>
+    <p>{escape(primary)}</p>
+  </div>
+  {render_list(supporting)}
+  <div class="status-strip decision-strip">
+    <span class="pill {source_status_class(source_status)}">sources {escape(source_status)} / {evidence_count}</span>
+    <span class="pill {review_status_class(review.status)}">human review {escape(review.status)}</span>
+    <span class="pill {'verified' if result.verification_passed else 'blocked'}">verification {'pass' if result.verification_passed else 'blocked'}</span>
+  </div>
+</section>
 """
 
 
@@ -1017,34 +1056,65 @@ def configured_mcp(env: Mapping[str, str]) -> bool:
 
 def status_class(status: str) -> str:
     return {
-        "finalized": "ok",
-        "retrieving": "info",
-        "drafting": "info",
-        "verifying": "info",
-        "async_pending": "warn",
-        "clarifying": "warn",
-    }.get(status, "info")
+        "finalized": "verified",
+        "retrieving": "running",
+        "drafting": "running",
+        "verifying": "running",
+        "async_pending": "async",
+        "clarifying": "clarify",
+    }.get(status, "neutral")
 
 
 def review_status_class(status: str) -> str:
     return {
-        "approved": "ok",
-        "not_required": "ok",
-        "queued": "warn",
-        "in_review": "warn",
-        "changes_requested": "warn",
-        "rejected": "warn",
-    }.get(status, "info")
+        "approved": "verified",
+        "not_required": "verified",
+        "queued": "review",
+        "in_review": "review",
+        "changes_requested": "clarify",
+        "rejected": "blocked",
+    }.get(status, "neutral")
 
 
 def proof_status_class(status: str) -> str:
     return {
-        "checked": "ok",
-        "not_applicable": "ok",
-        "generated": "info",
-        "unavailable": "warn",
-        "failed": "warn",
-    }.get(status, "info")
+        "checked": "verified",
+        "not_applicable": "verified",
+        "generated": "running",
+        "unavailable": "clarify",
+        "failed": "blocked",
+    }.get(status, "neutral")
+
+
+def gate_status_class(status: str) -> str:
+    return {
+        "ready": "verified",
+        "go": "verified",
+        "finalized": "verified",
+        "needs_more_info": "blocked",
+        "blocked": "blocked",
+        "clarifying": "clarify",
+    }.get(status, "clarify")
+
+
+def route_status_class(mode: str) -> str:
+    return {
+        "sync": "neutral",
+        "async": "async",
+        "async_pending": "async",
+        "human_review": "review",
+    }.get(mode, "neutral")
+
+
+def source_status_class(status: str) -> str:
+    return {
+        "retrieved": "verified",
+        "configured": "running",
+        "planned": "clarify",
+        "missing_config": "blocked",
+        "provider_error": "blocked",
+        "empty": "clarify",
+    }.get(status, "neutral")
 
 
 def main() -> None:
@@ -1071,6 +1141,8 @@ CSS = """
   --blue: #2764a6;
   --amber: #9a6700;
   --teal: #0f766e;
+  --purple: #7357a5;
+  --gray: #59615d;
 }
 * { box-sizing: border-box; }
 body {
@@ -1104,9 +1176,13 @@ h2 { font-size: 15px; line-height: 1.2; letter-spacing: 0; }
   font-size: 13px;
   background: #f9faf8;
 }
-.pill.ok { color: var(--green); border-color: #b9d8c5; }
-.pill.warn { color: var(--amber); border-color: #e3cc95; }
-.pill.info { color: var(--blue); border-color: #b8cbe2; }
+.pill.verified, .pill.ok { color: var(--green); border-color: #9ccdad; background: #eefaf3; }
+.pill.blocked { color: var(--red); border-color: #e2a29d; background: #fff3f2; }
+.pill.clarify, .pill.warn { color: var(--amber); border-color: #e3cc95; background: #fff8e7; }
+.pill.running, .pill.info { color: var(--blue); border-color: #b8cbe2; background: #eff6ff; }
+.pill.async { color: var(--purple); border-color: #c8b8e6; background: #f7f2ff; }
+.pill.review { color: var(--teal); border-color: #9acbc6; background: #eefaf8; }
+.pill.neutral { color: var(--gray); border-color: var(--line); background: #f9faf8; }
 .workspace {
   display: grid;
   grid-template-columns: minmax(280px, 0.85fr) minmax(420px, 1.45fr) minmax(280px, 0.9fr);
@@ -1145,6 +1221,7 @@ button {
   cursor: pointer;
 }
 button:disabled { cursor: not-allowed; opacity: 0.55; }
+form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; background: #e9f3ff; }
 .capture-state { color: var(--muted); font-size: 13px; min-height: 18px; }
 .status-grid { display: grid; gap: 8px; margin-top: 12px; }
 .status-row { display: grid; grid-template-columns: 14px 1fr; gap: 8px; align-items: center; font-size: 13px; }
@@ -1153,6 +1230,33 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .dot.red { background: var(--red); }
 .dot.blue { background: var(--blue); }
 .dot.yellow { background: var(--amber); }
+.decision-panel {
+  border-width: 2px;
+  background: #ffffff;
+}
+.decision-panel.verified { border-color: #9ccdad; box-shadow: 0 0 0 3px rgba(31, 122, 77, 0.08); }
+.decision-panel.blocked { border-color: #e2a29d; box-shadow: 0 0 0 3px rgba(177, 61, 50, 0.08); }
+.decision-panel.clarify { border-color: #e3cc95; box-shadow: 0 0 0 3px rgba(154, 103, 0, 0.08); }
+.decision-callout {
+  display: grid;
+  gap: 8px;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcfb;
+  border: 1px solid var(--line);
+}
+.decision-label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.decision-callout p {
+  font-size: 17px;
+  line-height: 1.45;
+  font-weight: 650;
+}
+.decision-strip { margin-top: 12px; }
 .spec-grid, .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .spec-grid p, .detail-grid p, li { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .detail-grid { margin-top: 14px; }
@@ -1198,12 +1302,17 @@ tr.dominated td { color: var(--muted); }
 
 JS = """
 const fileInput = document.querySelector("#files");
+const inputForm = document.querySelector(".input-panel");
+const runButton = document.querySelector("#runSpec");
 const recordButton = document.querySelector("#recordAudio");
 const stopButton = document.querySelector("#stopAudio");
 const speechButton = document.querySelector("#transcribeSpeech");
 const speechInput = document.querySelector("#speech_text");
 const queryInput = document.querySelector("#query");
 const captureState = document.querySelector("#captureState");
+const copyAnswerButton = document.querySelector("#copyAnswer");
+const markReviewedButton = document.querySelector("#markReviewed");
+const decisionPanel = document.querySelector("#decisionPanel");
 let recorder = null;
 let chunks = [];
 
@@ -1213,6 +1322,38 @@ function appendFile(file) {
   transfer.items.add(file);
   fileInput.files = transfer.files;
 }
+
+inputForm?.addEventListener("submit", () => {
+  inputForm.classList.add("running");
+  if (runButton) {
+    runButton.disabled = true;
+    runButton.textContent = "Running...";
+  }
+  if (captureState) {
+    captureState.textContent = "running spec game: retrieving sources, verifying, and building answer";
+  }
+});
+
+copyAnswerButton?.addEventListener("click", async () => {
+  const text = decisionPanel?.innerText?.trim() || "";
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    copyAnswerButton.textContent = "Copied";
+  } catch {
+    copyAnswerButton.textContent = "Copy failed";
+  }
+  setTimeout(() => { copyAnswerButton.textContent = "Copy Answer"; }, 1400);
+});
+
+markReviewedButton?.addEventListener("click", () => {
+  markReviewedButton.textContent = "Reviewed";
+  markReviewedButton.disabled = true;
+  decisionPanel?.querySelectorAll(".pill.review, .pill.clarify").forEach(item => {
+    item.classList.remove("review", "clarify");
+    item.classList.add("verified");
+  });
+});
 
 recordButton?.addEventListener("click", async () => {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
