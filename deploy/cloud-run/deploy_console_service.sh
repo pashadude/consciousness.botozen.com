@@ -42,7 +42,9 @@ MCP_RESEARCH_COMMAND="${MCP_RESEARCH_COMMAND:-python -m opoint_mcp.server}"
 MCP_RESEARCH_CWD="${MCP_RESEARCH_CWD:-}"
 OPOINT_API_KEY_SECRET="${OPOINT_API_KEY_SECRET:-}"
 if [[ -z "${OPOINT_API_KEY_SECRET}" ]] && \
-  gcloud secrets describe opoint-api-key --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud secrets versions describe latest \
+    --secret=opoint-api-key \
+    --project="${PROJECT_ID}" >/dev/null 2>&1; then
   OPOINT_API_KEY_SECRET="opoint-api-key"
 fi
 
