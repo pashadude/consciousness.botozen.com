@@ -50,7 +50,13 @@ def persist_console_talk(
         ],
         "commitments": [item.model_dump(mode="json") for item in ledger.commitments],
         "claim_graph": [item.model_dump(mode="json") for item in ledger.claim_graph],
+        "proof_obligations": [
+            item.model_dump(mode="json") for item in ledger.proof_obligations
+        ],
+        "equilibrium_diagnostics": ledger.equilibrium_diagnostics.model_dump(mode="json"),
         "user_endorsement": ledger.user_endorsement.model_dump(mode="json"),
+        "human_review": ledger.human_review.model_dump(mode="json"),
+        "skill_compatibility": ledger.skill_compatibility.model_dump(mode="json"),
         "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
         "route_history": [item.model_dump(mode="json") for item in ledger.route_history],
         "source_layer": {

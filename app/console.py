@@ -129,6 +129,14 @@ async def create_spec_json(
                     "low",
                 ),
             },
+            "human_review": result.ledger.human_review.model_dump(mode="json"),
+            "skill_compatibility": result.ledger.skill_compatibility.model_dump(mode="json"),
+            "proof_obligations": [
+                item.model_dump(mode="json") for item in result.ledger.proof_obligations
+            ],
+            "equilibrium_diagnostics": result.ledger.equilibrium_diagnostics.model_dump(
+                mode="json"
+            ),
             "frontier": [candidate.key for candidate in result.candidates if candidate.key in result.frontier_keys],
             "source_layer": {
                 "provider": result.rag_result.provider,
@@ -370,6 +378,8 @@ def render_workspace(
   </section>
   <section class="center-rail">
     {render_game_panel(result)}
+    {render_proof_obligations_panel(result)}
+    {render_equilibrium_panel(result)}
     {render_source_layer_panel(result)}
     {render_answer_panel(result)}
     {render_spec_panel(result)}
@@ -377,6 +387,8 @@ def render_workspace(
   </section>
   <section class="right-rail">
     {render_artifacts_panel(result)}
+    {render_human_review_panel(result)}
+    {render_skill_compatibility_panel(result)}
     {render_route_panel(result)}
     {render_spend_panel(spend)}
   </section>
@@ -523,6 +535,73 @@ def render_game_panel(result: ConsoleResult) -> str:
   <details>
     <summary>Claim Graph</summary>
     <ul class="source-list">{claim_rows}</ul>
+  </details>
+</section>
+"""
+
+
+def render_proof_obligations_panel(result: ConsoleResult) -> str:
+    obligations = result.ledger.proof_obligations
+    open_count = sum(
+        1 for item in obligations if item.required and item.status not in {"satisfied", "waived"}
+    )
+    rows = "\n".join(
+        f"""
+<li class="{escape(item.status)}">
+  <strong>{escape(item.source_type)} / {escape(item.status)}</strong>
+  <span>{escape(item.obligation_id)}</span>
+  <p>{escape(item.statement)} {escape(item.remediation or '')}</p>
+</li>
+"""
+        for item in obligations[:12]
+    ) or "<li><span>No proof obligations generated.</span></li>"
+    return f"""
+<section class="panel proof-panel">
+  <div class="panel-title">
+    <h2>Proof Obligations</h2>
+    <span class="muted">{open_count} open</span>
+  </div>
+  <ul class="source-list">{rows}</ul>
+</section>
+"""
+
+
+def render_equilibrium_panel(result: ConsoleResult) -> str:
+    diagnostic = result.ledger.equilibrium_diagnostics
+    rows = "\n".join(
+        f"""
+<tr class="{'dominated' if item.dominated else 'frontier'}">
+  <td>{escape(item.action)}</td>
+  <td>{item.specification_gain:.2f}</td>
+  <td>{item.risk_reduction:.2f}</td>
+  <td>{item.user_burden:.2f}</td>
+  <td>{item.latency_cost:.2f}</td>
+  <td>{item.policy_penalty:.2f}</td>
+</tr>
+"""
+        for item in diagnostic.payoffs
+    )
+    conflicts = render_list(diagnostic.unresolved_conflicts)
+    return f"""
+<section class="panel equilibrium-panel">
+  <div class="panel-title">
+    <h2>Equilibrium Diagnostics</h2>
+    <span class="pill info">{escape(diagnostic.recommended_action)}</span>
+  </div>
+  <p class="subtle">{escape(diagnostic.rationale)}</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>action</th><th>spec</th><th>risk</th><th>burden</th><th>latency</th><th>policy</th>
+        </tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+  <details>
+    <summary>Conflicts</summary>
+    {conflicts}
   </details>
 </section>
 """
@@ -692,6 +771,84 @@ def render_artifacts_panel(result: ConsoleResult) -> str:
 """
 
 
+def render_human_review_panel(result: ConsoleResult) -> str:
+    review = result.ledger.human_review
+    reason_rows = render_list(review.reasons)
+    action_rows = render_list(review.required_actions)
+    claim_rows = render_list(review.blocking_claim_ids)
+    evidence_rows = render_list(review.blocking_evidence)
+    condition_rows = render_list(review.approval_conditions)
+    return f"""
+<section class="panel review-panel">
+  <div class="panel-title">
+    <h2>Human Review Queue</h2>
+    <span class="pill {review_status_class(review.status)}">{escape(review.status)}</span>
+  </div>
+  <dl class="kv">
+    <dt>required</dt><dd>{escape(str(review.required).lower())}</dd>
+    <dt>risk</dt><dd>{escape(review.risk_level)}</dd>
+    <dt>assignee</dt><dd>{escape(review.assigned_player)}</dd>
+    <dt>owner</dt><dd>{escape(review.decision_owner)}</dd>
+  </dl>
+  <details open>
+    <summary>Reasons</summary>
+    {reason_rows}
+  </details>
+  <details open>
+    <summary>Required Actions</summary>
+    {action_rows}
+  </details>
+  <details>
+    <summary>Blocking Claims</summary>
+    {claim_rows}
+  </details>
+  <details>
+    <summary>Blocking Evidence</summary>
+    {evidence_rows}
+  </details>
+  <details>
+    <summary>Approval Conditions</summary>
+    {condition_rows}
+  </details>
+</section>
+"""
+
+
+def render_skill_compatibility_panel(result: ConsoleResult) -> str:
+    skill = result.ledger.skill_compatibility
+    risk_rows = render_list(skill.compatibility_risks)
+    evidence_rows = render_list(skill.evidence_required_for_handoff)
+    learned_rows = render_list(skill.learned_from)
+    return f"""
+<section class="panel skill-panel">
+  <div class="panel-title">
+    <h2>Skill Compatibility</h2>
+    <span class="pill info">{escape(skill.next_best_action)}</span>
+  </div>
+  <dl class="kv">
+    <dt>role</dt><dd>{escape(skill.inferred_role)}</dd>
+    <dt>skill</dt><dd>{escape(skill.skill_level)}</dd>
+    <dt>domain</dt><dd>{escape(skill.domain_familiarity)}</dd>
+    <dt>burden</dt><dd>{escape(skill.cognitive_burden)}</dd>
+    <dt>depth</dt><dd>{escape(skill.recommended_depth)}</dd>
+    <dt>handoff</dt><dd>{escape(skill.handoff_format)}</dd>
+  </dl>
+  <details open>
+    <summary>Compatibility Risks</summary>
+    {risk_rows}
+  </details>
+  <details>
+    <summary>Evidence For Handoff</summary>
+    {evidence_rows}
+  </details>
+  <details>
+    <summary>Learned From</summary>
+    {learned_rows}
+  </details>
+</section>
+"""
+
+
 def render_route_panel(result: ConsoleResult) -> str:
     reasons = render_list(list(getattr(result.route_decision, "reasons", [])))
     return f"""
@@ -832,6 +989,17 @@ def status_class(status: str) -> str:
         "verifying": "info",
         "async_pending": "warn",
         "clarifying": "warn",
+    }.get(status, "info")
+
+
+def review_status_class(status: str) -> str:
+    return {
+        "approved": "ok",
+        "not_required": "ok",
+        "queued": "warn",
+        "in_review": "warn",
+        "changes_requested": "warn",
+        "rejected": "warn",
     }.get(status, "info")
 
 

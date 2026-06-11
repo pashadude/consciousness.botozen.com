@@ -45,4 +45,8 @@ def test_persist_console_talk_writes_local_trace(tmp_path) -> None:
     assert payload["game_states"]
     assert payload["latent_type_beliefs"]
     assert payload["claim_graph"]
+    assert payload["proof_obligations"]
+    assert payload["equilibrium_diagnostics"]["recommended_action"] == "review"
+    assert payload["human_review"]["assigned_player"] == "human_reviewer"
+    assert payload["skill_compatibility"]["inferred_role"] == "commodity trader"
     assert payload["spec_convergence"]["overall"] > 0

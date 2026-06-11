@@ -60,6 +60,21 @@ def test_console_api_accepts_speech_text_and_audio(tmp_path, monkeypatch) -> Non
     assert payload["ledger"]["latent_type_beliefs"]
     assert payload["ledger"]["claim_graph"]
     assert payload["ledger"]["spec_convergence"]["overall"] > 0
+    assert payload["human_review"]["assigned_player"] == "human_reviewer"
+    assert payload["skill_compatibility"]["handoff_format"] in {
+        "decision_frame",
+        "review_packet",
+        "clarification_question",
+    }
+    assert isinstance(payload["proof_obligations"], list)
+    assert payload["equilibrium_diagnostics"]["recommended_action"] in {
+        "ask",
+        "retrieve",
+        "review",
+        "propose",
+        "finalize",
+        "defer",
+    }
 
 
 def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:
@@ -80,6 +95,10 @@ def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) ->
     assert response.status_code == 200
     assert "Mutual Specification Game" in response.text
     assert "Trader Source Layer" in response.text
+    assert "Human Review Queue" in response.text
+    assert "Skill Compatibility" in response.text
+    assert "Proof Obligations" in response.text
+    assert "Equilibrium Diagnostics" in response.text
     assert "&quot;sulfur&quot; &quot;Umm Qasr&quot; FOB price" in response.text
     assert "Provisional Decision Frame" in response.text
     assert "not go-ready" in response.text
@@ -91,6 +110,8 @@ def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) ->
     assert "Reconstruct whether the commodity offer is executable" in response.text
     assert "offer.png" in response.text
     assert "image/png" in response.text
+    assert "Compressed high-stakes trader or physical commodity decision signal." in response.text
+    assert "review_packet" in response.text
 
 
 def test_console_sulfur_offer_renders_fixture_source_evidence(tmp_path, monkeypatch) -> None:

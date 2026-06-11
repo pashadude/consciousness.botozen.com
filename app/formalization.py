@@ -272,7 +272,11 @@ class MutualSpecificationGameTask(FormalizationTask):
         "latent_type_beliefs": "Maintain Harsanyi-style beliefs over hidden task types theta from query signal q.",
         "commitments": "Track accepted/proposed commitments rather than treating fluent output as agreement.",
         "claim_graph": "Transform response content into claims with support, dependencies, and verifier state.",
+        "proof_obligations": "Condense unsupported claims, evidence gaps, formal gaps, and review gaps into verifier work items.",
+        "equilibrium_diagnostics": "Expose multicriteria action dominance instead of silently choosing the next move.",
         "convergence_metric": "Score convergence between latent intent, expressed query, and executable specification.",
+        "human_review_gate": "Build a reviewer packet for high-stakes or blocked specs before decision-ready output.",
+        "skill_compatible_handoff": "Track what the user can verify and what handoff format preserves user agency.",
         "model_zoo_routing": "Route across models, tools, verifiers, async jobs, and human review by risk and spec gain.",
         "trader_gate": "Keep trader decisions blocked until evidence, risk, and proof obligations are satisfied.",
     }
@@ -284,6 +288,7 @@ class MutualSpecificationGameTask(FormalizationTask):
             "game_states": [item.stage_id for item in ledger.game_states],
             "beliefs": [item.type_id for item in ledger.latent_type_beliefs],
             "claim_count": len(ledger.claim_graph),
+            "human_review_required": ledger.human_review.required,
             "decision_gate": ledger.decision_gate,
         }
         question = "Which mechanics must exist for the Mutual Specification Game to be executable?"
@@ -306,6 +311,12 @@ class MutualSpecificationGameTask(FormalizationTask):
             ],
             "commitments": [item.model_dump(mode="json") for item in ledger.commitments],
             "claim_graph": [item.model_dump(mode="json") for item in ledger.claim_graph],
+            "proof_obligations": [
+                item.model_dump(mode="json") for item in ledger.proof_obligations
+            ],
+            "equilibrium_diagnostics": ledger.equilibrium_diagnostics.model_dump(mode="json"),
+            "human_review": ledger.human_review.model_dump(mode="json"),
+            "skill_compatibility": ledger.skill_compatibility.model_dump(mode="json"),
             "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
             "route_history": [item.model_dump(mode="json") for item in ledger.route_history],
             "async_jobs": [item.model_dump(mode="json") for item in ledger.async_jobs],
@@ -350,7 +361,17 @@ class MutualSpecificationGameTask(FormalizationTask):
             "latent_type_beliefs": bool(belief_ids),
             "commitments": bool(hypothesis.get("commitments")),
             "claim_graph": bool(claim_graph),
+            "proof_obligations": bool(hypothesis.get("proof_obligations") is not None),
+            "equilibrium_diagnostics": bool(
+                hypothesis.get("equilibrium_diagnostics", {}).get("recommended_action")
+            ),
             "convergence_metric": bool(hypothesis.get("spec_convergence", {}).get("overall") is not None),
+            "human_review_gate": bool(
+                hypothesis.get("human_review", {}).get("assigned_player") == "human_reviewer"
+            ),
+            "skill_compatible_handoff": bool(
+                hypothesis.get("skill_compatibility", {}).get("handoff_format")
+            ),
             "model_zoo_routing": bool(route_history),
             "trader_gate": "trader" in success_criteria or "trader" in verification_conditions,
         }
@@ -440,6 +461,8 @@ def extract_instruments(text: str) -> list[str]:
         "ULSD": (r"\bulsd\b", r"\bho\b"),
         "Brent": (r"\bbrent\b",),
         "WTI": (r"\bwti\b",),
+        "sulfur": (r"\bsulfur\b", r"\bsulphur\b"),
+        "FOB physical cargo": (r"\bfob\b", r"\bcargo\b", r"\btonne?s?\b", r"\bmt\b"),
         "crack spread": (r"\bcrack\b",),
         "basis spread": (r"\bbasis\b", r"\bspread\b"),
     }
@@ -455,6 +478,7 @@ def extract_actions(text: str) -> list[str]:
     action_terms = {
         "risk": ("risk", "var", "exposure"),
         "arbitrage": ("arb", "arbitrage"),
+        "physical_offer": ("offer", "fob", "cfr", "cif", "cargo", "ton", "tonne", "mt"),
         "route_check": ("route", "logistics", "turkey"),
         "counterparty_check": ("counterparty", "sanction", "legal"),
         "spread_analysis": ("spread", "basis", "bounce"),

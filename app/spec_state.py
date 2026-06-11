@@ -176,6 +176,50 @@ class ClaimRecord(BaseModel):
     ] = "unverified"
 
 
+class ProofObligationRecord(BaseModel):
+    """Verifier work item that must be proved, waived, or kept blocked."""
+
+    obligation_id: str
+    source_type: Literal[
+        "artifact",
+        "claim",
+        "evidence",
+        "formalization",
+        "human_review",
+        "verifier_finding",
+    ]
+    source_id: str
+    statement: str
+    required: bool = True
+    status: Literal["open", "satisfied", "blocked", "waived"] = "open"
+    remediation: str | None = None
+
+
+class GameActionPayoff(BaseModel):
+    """Multicriteria payoff estimate for one possible next action."""
+
+    action: Literal["ask", "retrieve", "review", "propose", "finalize", "defer"]
+    specification_gain: float = 0.0
+    risk_reduction: float = 0.0
+    user_burden: float = 0.0
+    latency_cost: float = 0.0
+    policy_penalty: float = 0.0
+    dominated: bool = False
+    rationale: str = ""
+
+
+class EquilibriumDiagnosticState(BaseModel):
+    """Action dominance diagnostic for the current specification game."""
+
+    diagnostic_id: str = Field(default_factory=lambda: f"eq-{uuid4().hex[:12]}")
+    recommended_action: Literal["ask", "retrieve", "review", "propose", "finalize", "defer"] = "ask"
+    solution_concept: str = "multicriteria_action_dominance"
+    payoffs: list[GameActionPayoff] = Field(default_factory=list)
+    dominated_actions: list[str] = Field(default_factory=list)
+    unresolved_conflicts: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
 class UserEndorsementState(BaseModel):
     """Whether the user has endorsed the current shared specification."""
 
@@ -183,6 +227,53 @@ class UserEndorsementState(BaseModel):
     rejected_fields: list[str] = Field(default_factory=list)
     pending_fields: list[str] = Field(default_factory=list)
     last_signal: str | None = None
+
+
+class HumanReviewState(BaseModel):
+    """Operator-facing review packet for high-stakes or blocked specs."""
+
+    review_id: str = Field(default_factory=lambda: f"review-{uuid4().hex[:12]}")
+    required: bool = False
+    status: Literal[
+        "not_required",
+        "queued",
+        "in_review",
+        "approved",
+        "changes_requested",
+        "rejected",
+    ] = "not_required"
+    risk_level: Literal["low", "medium", "high", "critical"] = "low"
+    assigned_player: str = "human_reviewer"
+    decision_owner: str = "user"
+    reasons: list[str] = Field(default_factory=list)
+    required_actions: list[str] = Field(default_factory=list)
+    blocking_claim_ids: list[str] = Field(default_factory=list)
+    blocking_evidence: list[str] = Field(default_factory=list)
+    approval_conditions: list[str] = Field(default_factory=list)
+    last_reviewer_signal: str | None = None
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class SkillCompatibilityState(BaseModel):
+    """How the output should fit the user's ability to verify and continue."""
+
+    inferred_role: str = "unknown"
+    skill_level: Literal["unknown", "novice", "intermediate", "expert"] = "unknown"
+    domain_familiarity: Literal["low", "medium", "high"] = "low"
+    cognitive_burden: Literal["low", "medium", "high"] = "medium"
+    recommended_depth: Literal["brief", "standard", "deep"] = "standard"
+    handoff_format: Literal[
+        "clarification_question",
+        "decision_frame",
+        "implementation_plan",
+        "proof_packet",
+        "review_packet",
+    ] = "clarification_question"
+    compatibility_risks: list[str] = Field(default_factory=list)
+    evidence_required_for_handoff: list[str] = Field(default_factory=list)
+    next_best_action: Literal["ask", "summarize", "retrieve", "review", "execute_spec"] = "ask"
+    learned_from: list[str] = Field(default_factory=lambda: ["current_query"])
 
 
 class SpecConvergenceState(BaseModel):
@@ -193,6 +284,9 @@ class SpecConvergenceState(BaseModel):
     formalization_resolution: float = 0.0
     endorsement_resolution: float = 0.0
     verification_resolution: float = 0.0
+    human_review_resolution: float = 0.0
+    skill_compatibility_resolution: float = 0.0
+    proof_obligation_resolution: float = 0.0
     overall: float = 0.0
     status: Literal["diverged", "negotiating", "executable", "verified"] = "diverged"
 
@@ -285,7 +379,13 @@ class SpecLedger(BaseModel):
     latent_type_beliefs: list[LatentTypeBelief] = Field(default_factory=list)
     commitments: list[CommitmentRecord] = Field(default_factory=list)
     claim_graph: list[ClaimRecord] = Field(default_factory=list)
+    proof_obligations: list[ProofObligationRecord] = Field(default_factory=list)
+    equilibrium_diagnostics: EquilibriumDiagnosticState = Field(
+        default_factory=EquilibriumDiagnosticState
+    )
     user_endorsement: UserEndorsementState = Field(default_factory=UserEndorsementState)
+    human_review: HumanReviewState = Field(default_factory=HumanReviewState)
+    skill_compatibility: SkillCompatibilityState = Field(default_factory=SkillCompatibilityState)
     spec_convergence: SpecConvergenceState = Field(default_factory=SpecConvergenceState)
     route_history: list[RouteRecord] = Field(default_factory=list)
     async_jobs: list[AsyncJobRef] = Field(default_factory=list)
@@ -343,6 +443,10 @@ def update_mutual_spec_game_state(ledger: SpecLedger) -> SpecLedger:
     sync_commitments(ledger)
     sync_claim_graph(ledger)
     sync_user_endorsement(ledger)
+    sync_human_review_state(ledger)
+    sync_skill_compatibility_state(ledger)
+    sync_proof_obligations(ledger)
+    sync_equilibrium_diagnostics(ledger)
     ledger.game_states = build_game_states(ledger)
     ledger.spec_convergence = compute_spec_convergence(ledger)
     return ledger
@@ -614,7 +718,15 @@ def build_game_states(ledger: SpecLedger) -> list[GameStageState]:
     high_findings = [item.message for item in ledger.verification_findings if item.severity == "high"]
     latest_formal = ledger.formalization_records[-1] if ledger.formalization_records else None
     formal_missing = latest_formal.missing_obligations if latest_formal and latest_formal.is_valid != 1 else []
-    return [
+    open_proofs = [
+        item.statement
+        for item in ledger.proof_obligations
+        if item.status not in {"satisfied", "waived"}
+    ]
+    blocked_proofs = [
+        item.statement for item in ledger.proof_obligations if item.status == "blocked"
+    ]
+    states = [
         GameStageState(
             stage_id="elicitation",
             game_type="cooperative_partial_information",
@@ -648,6 +760,22 @@ def build_game_states(ledger: SpecLedger) -> list[GameStageState]:
             blocking_conditions=formal_missing,
         ),
         GameStageState(
+            stage_id="proof_obligations",
+            game_type="proof_carrying_response_game",
+            objective="Reduce claims, evidence gaps, review requirements, and verifier findings to explicit proof work.",
+            success_condition="Every required proof obligation is satisfied or explicitly waived.",
+            status="blocked" if blocked_proofs else "active" if open_proofs else "satisfied",
+            blocking_conditions=(blocked_proofs or open_proofs)[:8],
+        ),
+        GameStageState(
+            stage_id="equilibrium_diagnostics",
+            game_type="multicriteria_action_dominance_game",
+            objective="Identify which next actions are dominated under specification gain, risk reduction, burden, latency, and policy constraints.",
+            success_condition="The recommended action is nondominated and its conflicts are explicit.",
+            status="satisfied" if ledger.equilibrium_diagnostics.payoffs else "open",
+            blocking_conditions=ledger.equilibrium_diagnostics.unresolved_conflicts[:8],
+        ),
+        GameStageState(
             stage_id="verification",
             game_type="adversarial_verification_game",
             objective="Block unsupported claims, unsafe paths, and specification gaming.",
@@ -656,6 +784,526 @@ def build_game_states(ledger: SpecLedger) -> list[GameStageState]:
             blocking_conditions=high_findings,
         ),
     ]
+    review = ledger.human_review
+    if review.required:
+        review_status = "satisfied" if review.status == "approved" else "blocked"
+        review_blocks = review.required_actions[:8] or review.reasons[:8]
+    else:
+        review_status = "satisfied"
+        review_blocks = []
+    states.append(
+        GameStageState(
+            stage_id="human_review",
+            game_type="skill_compatible_review_game",
+            objective="Keep high-stakes decisions compatible with the user's skill, evidence, and decision ownership.",
+            success_condition="Human reviewer approves, rejects, or requests more evidence before a decision-ready gate clears.",
+            status=review_status,
+            blocking_conditions=review_blocks,
+        )
+    )
+    return states
+
+
+def sync_human_review_state(ledger: SpecLedger) -> None:
+    previous = ledger.human_review
+    text = (ledger.expressed_query or ledger.user_request).lower()
+    required_search = [item for item in ledger.search_plan if item.required]
+    unsatisfied_search = [item for item in required_search if item.status != "satisfied"]
+    high_findings = [item for item in ledger.verification_findings if item.severity == "high"]
+    medium_findings = [item for item in ledger.verification_findings if item.severity == "medium"]
+    latest_formal = ledger.formalization_records[-1] if ledger.formalization_records else None
+    formal_missing = latest_formal.missing_obligations if latest_formal and latest_formal.is_valid != 1 else []
+    blocking_claims = [
+        item
+        for item in ledger.claim_graph
+        if item.verifier_state in {"needs_evidence", "blocked", "refuted"}
+    ]
+    artifact_blocks = [
+        artifact.filename
+        for artifact in ledger.artifact_refs
+        if artifact.mime_type
+        and (artifact.mime_type.startswith("image/") or artifact.mime_type.startswith("audio/"))
+    ]
+
+    reasons: list[str] = []
+    required_actions: list[str] = []
+    blocking_evidence: list[str] = []
+    approval_conditions = [
+        "No high-severity verifier findings remain.",
+        "Required evidence is retrieved, inspected, or explicitly waived with rationale.",
+        "Unsupported claim-graph nodes are supported, downgraded to assumptions, or removed.",
+        "The user remains final decision owner; the agent does not execute trades or broker actions.",
+    ]
+
+    high_stakes = requires_human_review_for_query(text)
+    if high_stakes:
+        reasons.append("Compressed high-stakes trader or physical commodity decision signal.")
+        required_actions.append("Confirm the trader-facing decision frame and preserve user decision ownership.")
+    if ledger.decision_gate == "needs_more_info" and high_stakes:
+        reasons.append("Decision gate is still needs_more_info for a high-stakes prompt.")
+    if high_findings:
+        reasons.append("High-severity verifier findings block approval.")
+        required_actions.extend(f"Resolve verifier finding: {item.message}" for item in high_findings[:6])
+    if formal_missing:
+        reasons.append("Formalization obligations are incomplete.")
+        required_actions.append("Resolve missing formal obligation(s): " + ", ".join(formal_missing[:8]))
+    if unsatisfied_search and high_stakes:
+        reasons.append("Required source/evidence plan is not fully satisfied.")
+        for item in unsatisfied_search[:8]:
+            blocking_evidence.append(item.purpose)
+            required_actions.append(f"Retrieve or attach evidence for: {item.purpose}")
+    if blocking_claims and high_stakes:
+        reasons.append("Claim graph contains blocked or evidence-needed nodes.")
+        required_actions.append("Review blocking claim IDs and either support, waive, or remove them.")
+    if artifact_blocks and high_stakes:
+        reasons.append("Uploaded image/audio artifacts need inspection before material claims can clear.")
+        required_actions.extend(f"Inspect or transcribe artifact before relying on it: {name}" for name in artifact_blocks[:6])
+    if medium_findings and high_stakes:
+        reasons.append("Medium-severity verifier findings require reviewer awareness.")
+
+    required = bool(reasons)
+    if high_findings:
+        risk_level = "critical"
+    elif high_stakes:
+        risk_level = "high"
+    elif formal_missing or unsatisfied_search or blocking_claims or artifact_blocks:
+        risk_level = "medium"
+    else:
+        risk_level = "low"
+
+    approval_still_valid = previous.status == "approved" and not (
+        high_findings or formal_missing or unsatisfied_search or blocking_claims or artifact_blocks
+    )
+    if not required:
+        status = "not_required"
+    elif approval_still_valid:
+        status = "approved"
+    elif previous.status in {"in_review", "changes_requested", "rejected"}:
+        status = previous.status
+    else:
+        status = "queued"
+
+    ledger.human_review = HumanReviewState(
+        review_id=previous.review_id,
+        required=required,
+        status=status,
+        risk_level=risk_level,
+        assigned_player=previous.assigned_player or "human_reviewer",
+        decision_owner=previous.decision_owner or "user",
+        reasons=dedupe_text(reasons)[:12],
+        required_actions=dedupe_text(required_actions)[:16],
+        blocking_claim_ids=[item.claim_id for item in blocking_claims[:16]],
+        blocking_evidence=dedupe_text(blocking_evidence)[:16],
+        approval_conditions=approval_conditions,
+        last_reviewer_signal=previous.last_reviewer_signal,
+        created_at=previous.created_at,
+        updated_at=datetime.now(UTC).isoformat(),
+    )
+
+
+def requires_human_review_for_query(text: str) -> bool:
+    if not looks_like_trader_query(text):
+        return False
+    decision_tokens = (
+        "should i",
+        "go for it",
+        "accept",
+        "buy",
+        "sell",
+        "execute",
+        "order",
+        "position",
+        "offer",
+        "fob",
+        "cfr",
+        "cif",
+        "counterparty",
+        "sanction",
+        "cargo",
+        "ton",
+        "tonne",
+        "tonns",
+        "mt",
+    )
+    architecture_tokens = (
+        "mutual specification",
+        "specification game",
+        "model zoo",
+        "implement",
+        "architecture",
+    )
+    if any(token in text for token in architecture_tokens) and not any(
+        token in text for token in ("should i", "go for it", "offer", "buy", "sell", "execute")
+    ):
+        return False
+    return any(token in text for token in decision_tokens)
+
+
+def dedupe_text(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def sync_proof_obligations(ledger: SpecLedger) -> None:
+    obligations: list[ProofObligationRecord] = []
+    for item in ledger.search_plan:
+        if not item.required:
+            continue
+        obligations.append(
+            ProofObligationRecord(
+                obligation_id=f"proof:{stable_id('evidence:' + item.query_id)}",
+                source_type="evidence",
+                source_id=item.query_id,
+                statement=f"Evidence plan must satisfy: {item.purpose}",
+                status="satisfied" if item.status == "satisfied" else "open",
+                remediation=f"Retrieve, attach, or explicitly waive evidence for query: {item.query}",
+            )
+        )
+    for claim in ledger.claim_graph:
+        if claim.claim_type not in {"fact", "inference"}:
+            continue
+        if claim.verifier_state == "supported":
+            continue
+        status = "blocked" if claim.verifier_state in {"blocked", "refuted"} else "open"
+        obligations.append(
+            ProofObligationRecord(
+                obligation_id=f"proof:{stable_id('claim:' + claim.claim_id)}",
+                source_type="claim",
+                source_id=claim.claim_id,
+                statement=f"Claim requires support or downgrade: {claim.text}",
+                status=status,
+                remediation="Attach support IDs, downgrade to assumption, remove the claim, or keep the gate blocked.",
+            )
+        )
+    latest_formal = ledger.formalization_records[-1] if ledger.formalization_records else None
+    if latest_formal and latest_formal.is_valid != 1:
+        for missing in latest_formal.missing_obligations:
+            obligations.append(
+                ProofObligationRecord(
+                    obligation_id=f"proof:{stable_id('formal:' + latest_formal.task_name + ':' + missing)}",
+                    source_type="formalization",
+                    source_id=latest_formal.task_name,
+                    statement=f"Formalization obligation is missing: {missing}",
+                    status="open",
+                    remediation="Resolve the formal obligation or keep the current decision gate blocked.",
+                )
+            )
+    if ledger.human_review.required:
+        obligations.append(
+            ProofObligationRecord(
+                obligation_id=f"proof:{stable_id('human_review:' + ledger.human_review.review_id)}",
+                source_type="human_review",
+                source_id=ledger.human_review.review_id,
+                statement="Human review approval is required before a decision-ready handoff.",
+                status="satisfied" if ledger.human_review.status == "approved" else "open",
+                remediation="Approve, reject, or request more evidence in the human-review workflow.",
+            )
+        )
+    for artifact in ledger.artifact_refs:
+        if not artifact.mime_type or not (
+            artifact.mime_type.startswith("image/") or artifact.mime_type.startswith("audio/")
+        ):
+            continue
+        obligations.append(
+            ProofObligationRecord(
+                obligation_id=f"proof:{stable_id('artifact:' + artifact.artifact_id)}",
+                source_type="artifact",
+                source_id=artifact.artifact_id,
+                statement=f"Artifact must be inspected or transcribed before material claims rely on it: {artifact.filename}",
+                status="open",
+                remediation="Inspect the image/PDF/audio or attach a verified transcript/extraction.",
+            )
+        )
+    for index, finding in enumerate(ledger.verification_findings):
+        if finding.severity == "low":
+            continue
+        obligations.append(
+            ProofObligationRecord(
+                obligation_id=f"proof:{stable_id(f'finding:{index}:{finding.message}')}",
+                source_type="verifier_finding",
+                source_id=f"finding:{index}",
+                statement=f"Verifier finding must be resolved: {finding.message}",
+                status="blocked" if finding.severity == "high" else "open",
+                remediation=finding.remediation,
+            )
+        )
+    ledger.proof_obligations = dedupe_proof_obligations(obligations)[-MAX_TRACE_STEPS:]
+
+
+def dedupe_proof_obligations(
+    obligations: list[ProofObligationRecord],
+) -> list[ProofObligationRecord]:
+    seen: set[str] = set()
+    result: list[ProofObligationRecord] = []
+    for obligation in obligations:
+        if obligation.obligation_id in seen:
+            continue
+        seen.add(obligation.obligation_id)
+        result.append(obligation)
+    return result
+
+
+def sync_equilibrium_diagnostics(ledger: SpecLedger) -> None:
+    previous = ledger.equilibrium_diagnostics
+    missing_material = bool(ledger.ambiguities)
+    unsatisfied_evidence = any(item.required and item.status != "satisfied" for item in ledger.search_plan)
+    review_required = ledger.human_review.required and ledger.human_review.status != "approved"
+    open_proofs = any(
+        item.required and item.status not in {"satisfied", "waived"}
+        for item in ledger.proof_obligations
+    )
+    high_findings = any(item.severity == "high" for item in ledger.verification_findings)
+    gate_blocked = ledger.decision_gate == "needs_more_info"
+
+    payoffs = [
+        GameActionPayoff(
+            action="ask",
+            specification_gain=0.85 if missing_material else 0.25,
+            risk_reduction=0.45 if missing_material else 0.15,
+            user_burden=0.65,
+            latency_cost=0.10,
+            policy_penalty=0.0,
+            rationale="Best when material fields are missing; otherwise adds user burden.",
+        ),
+        GameActionPayoff(
+            action="retrieve",
+            specification_gain=0.85 if unsatisfied_evidence or open_proofs else 0.25,
+            risk_reduction=0.70 if unsatisfied_evidence or open_proofs else 0.20,
+            user_burden=0.20,
+            latency_cost=0.55,
+            policy_penalty=0.0,
+            rationale="Best when external evidence or proof obligations are open.",
+        ),
+        GameActionPayoff(
+            action="review",
+            specification_gain=0.70 if review_required else 0.15,
+            risk_reduction=0.90 if review_required or high_findings else 0.20,
+            user_burden=0.55,
+            latency_cost=0.50,
+            policy_penalty=0.0,
+            rationale="Best when user agency, high stakes, or reviewer approval is required.",
+        ),
+        GameActionPayoff(
+            action="propose",
+            specification_gain=0.55 if not missing_material else 0.20,
+            risk_reduction=0.35 if not high_findings else 0.05,
+            user_burden=0.30,
+            latency_cost=0.20,
+            policy_penalty=0.25 if open_proofs or review_required else 0.0,
+            rationale="Useful for a provisional spec, but unsafe if proof/review gates are still open.",
+        ),
+        GameActionPayoff(
+            action="finalize",
+            specification_gain=0.35 if not (gate_blocked or open_proofs or review_required) else 0.05,
+            risk_reduction=0.20 if not (gate_blocked or open_proofs or review_required) else 0.0,
+            user_burden=0.10,
+            latency_cost=0.10,
+            policy_penalty=1.0 if gate_blocked or open_proofs or review_required or high_findings else 0.0,
+            rationale="Only nondominated when all hard gates are clear.",
+        ),
+        GameActionPayoff(
+            action="defer",
+            specification_gain=0.45 if high_findings else 0.20,
+            risk_reduction=0.80 if high_findings else 0.35,
+            user_burden=0.10,
+            latency_cost=0.85,
+            policy_penalty=0.0,
+            rationale="Useful when async repair or deeper research is better than immediate response.",
+        ),
+    ]
+    payoffs = mark_dominated_actions(payoffs)
+    dominated_actions = [item.action for item in payoffs if item.dominated]
+    conflicts = equilibrium_conflicts(
+        gate_blocked=gate_blocked,
+        open_proofs=open_proofs,
+        review_required=review_required,
+        high_findings=high_findings,
+        unsatisfied_evidence=unsatisfied_evidence,
+    )
+    recommended = recommended_equilibrium_action(
+        missing_material=missing_material,
+        unsatisfied_evidence=unsatisfied_evidence,
+        review_required=review_required,
+        open_proofs=open_proofs,
+        high_findings=high_findings,
+        gate_blocked=gate_blocked,
+    )
+    ledger.equilibrium_diagnostics = EquilibriumDiagnosticState(
+        diagnostic_id=previous.diagnostic_id,
+        recommended_action=recommended,
+        payoffs=payoffs,
+        dominated_actions=dominated_actions,
+        unresolved_conflicts=conflicts,
+        rationale=equilibrium_rationale(recommended, conflicts),
+    )
+
+
+def mark_dominated_actions(payoffs: list[GameActionPayoff]) -> list[GameActionPayoff]:
+    result: list[GameActionPayoff] = []
+    for item in payoffs:
+        dominated = any(dominates_action(other, item) for other in payoffs if other.action != item.action)
+        result.append(item.model_copy(update={"dominated": dominated}))
+    return result
+
+
+def dominates_action(a: GameActionPayoff, b: GameActionPayoff) -> bool:
+    better_or_equal = (
+        a.specification_gain >= b.specification_gain
+        and a.risk_reduction >= b.risk_reduction
+        and a.user_burden <= b.user_burden
+        and a.latency_cost <= b.latency_cost
+        and a.policy_penalty <= b.policy_penalty
+    )
+    strictly_better = (
+        a.specification_gain > b.specification_gain
+        or a.risk_reduction > b.risk_reduction
+        or a.user_burden < b.user_burden
+        or a.latency_cost < b.latency_cost
+        or a.policy_penalty < b.policy_penalty
+    )
+    return better_or_equal and strictly_better
+
+
+def recommended_equilibrium_action(
+    *,
+    missing_material: bool,
+    unsatisfied_evidence: bool,
+    review_required: bool,
+    open_proofs: bool,
+    high_findings: bool,
+    gate_blocked: bool,
+) -> str:
+    if high_findings:
+        return "defer"
+    if review_required:
+        return "review"
+    if unsatisfied_evidence or open_proofs:
+        return "retrieve"
+    if missing_material or gate_blocked:
+        return "ask"
+    return "finalize"
+
+
+def equilibrium_conflicts(
+    *,
+    gate_blocked: bool,
+    open_proofs: bool,
+    review_required: bool,
+    high_findings: bool,
+    unsatisfied_evidence: bool,
+) -> list[str]:
+    conflicts: list[str] = []
+    if gate_blocked:
+        conflicts.append("Finalize conflicts with decision_gate=needs_more_info.")
+    if open_proofs:
+        conflicts.append("Finalize/propose conflicts with open proof obligations.")
+    if review_required:
+        conflicts.append("Finalize conflicts with required human review approval.")
+    if high_findings:
+        conflicts.append("Immediate response conflicts with high-severity verifier findings.")
+    if unsatisfied_evidence:
+        conflicts.append("Low-latency response conflicts with unsatisfied evidence obligations.")
+    return conflicts
+
+
+def equilibrium_rationale(recommended: str, conflicts: list[str]) -> str:
+    if conflicts:
+        return f"Recommended action `{recommended}` because hard conflicts remain: " + " ".join(conflicts)
+    return f"Recommended action `{recommended}` because no hard conflicts remain."
+
+
+def sync_skill_compatibility_state(ledger: SpecLedger) -> None:
+    text = (ledger.expressed_query or ledger.user_request).lower()
+    risks: list[str] = []
+    evidence_required: list[str] = []
+    learned_from = ["current_query"]
+
+    if is_mutual_spec_architecture_text(text):
+        inferred_role = "technical product builder"
+        skill_level = "expert"
+        domain_familiarity = "high"
+        cognitive_burden = "high"
+        recommended_depth = "deep"
+        handoff_format = "implementation_plan"
+    elif looks_like_trader_query(text):
+        inferred_role = "commodity trader"
+        skill_level = "expert"
+        domain_familiarity = "high"
+        cognitive_burden = "medium"
+        recommended_depth = "standard"
+        handoff_format = "review_packet" if ledger.human_review.required else "decision_frame"
+        risks.extend(
+            [
+                "Trader may be compressing a larger strategy, counterparty, or logistics problem into a short query.",
+                "A fluent yes/no answer could reduce decision ownership or encourage confirmation bias.",
+            ]
+        )
+        evidence_required.extend(item.purpose for item in ledger.search_plan if item.required)
+    elif ledger.output_format in {"code", "Python code", "design spec"}:
+        inferred_role = "technical operator"
+        skill_level = "intermediate"
+        domain_familiarity = "medium"
+        cognitive_burden = "medium"
+        recommended_depth = "standard"
+        handoff_format = "implementation_plan"
+    else:
+        inferred_role = ledger.audience or "unknown"
+        skill_level = "unknown"
+        domain_familiarity = "low"
+        cognitive_burden = "low"
+        recommended_depth = "brief"
+        handoff_format = "clarification_question" if ledger.ambiguities else "proof_packet"
+
+    if ledger.ambiguities:
+        risks.append("Material fields remain unresolved, so a detailed answer may hide the actual task gap.")
+    if ledger.human_review.required:
+        risks.append("High-stakes review is required before a decision-ready handoff is compatible.")
+    if any(item.verifier_state in {"needs_evidence", "blocked"} for item in ledger.claim_graph):
+        risks.append("Some claims still need support, waiver, or downgrade before the user can carry them forward.")
+
+    if ledger.human_review.required:
+        next_action = "review"
+    elif any(item.status != "satisfied" for item in ledger.search_plan if item.required):
+        next_action = "retrieve"
+    elif ledger.ambiguities:
+        next_action = "ask"
+    elif handoff_format == "implementation_plan":
+        next_action = "execute_spec"
+    else:
+        next_action = "summarize"
+
+    ledger.skill_compatibility = SkillCompatibilityState(
+        inferred_role=inferred_role,
+        skill_level=skill_level,  # type: ignore[arg-type]
+        domain_familiarity=domain_familiarity,  # type: ignore[arg-type]
+        cognitive_burden=cognitive_burden,  # type: ignore[arg-type]
+        recommended_depth=recommended_depth,  # type: ignore[arg-type]
+        handoff_format=handoff_format,  # type: ignore[arg-type]
+        compatibility_risks=dedupe_text(risks)[:10],
+        evidence_required_for_handoff=dedupe_text(evidence_required)[:12],
+        next_best_action=next_action,  # type: ignore[arg-type]
+        learned_from=learned_from,
+    )
+
+
+def is_mutual_spec_architecture_text(text: str) -> bool:
+    return any(
+        token in text
+        for token in (
+            "mutual specification",
+            "specification game",
+            "model zoo",
+            "proof-carrying",
+            "game theory",
+        )
+    ) and any(token in text for token in ("implement", "architecture", "build", "goal"))
 
 
 def compute_spec_convergence(ledger: SpecLedger) -> SpecConvergenceState:
@@ -686,17 +1334,52 @@ def compute_spec_convergence(ledger: SpecLedger) -> SpecConvergenceState:
         verification = 1.0
     else:
         verification = 0.25
+    review_state = ledger.human_review
+    if not review_state.required or review_state.status == "approved":
+        human_review = 1.0
+    elif review_state.status == "in_review":
+        human_review = 0.5
+    elif review_state.status == "changes_requested":
+        human_review = 0.35
+    elif review_state.status == "rejected":
+        human_review = 0.0
+    else:
+        human_review = 0.25
+    skill_state = ledger.skill_compatibility
+    if skill_state.next_best_action in {"review", "retrieve", "ask"}:
+        skill = 0.55
+    elif skill_state.compatibility_risks:
+        skill = 0.75
+    else:
+        skill = 1.0
+    required_proofs = [item for item in ledger.proof_obligations if item.required]
+    proof = (
+        sum(1 for item in required_proofs if item.status in {"satisfied", "waived"})
+        / len(required_proofs)
+        if required_proofs
+        else 1.0
+    )
     overall = round(
-        0.22 * material
-        + 0.22 * evidence
-        + 0.24 * formal
-        + 0.12 * endorsement
-        + 0.20 * verification,
+        0.16 * material
+        + 0.16 * evidence
+        + 0.18 * formal
+        + 0.08 * endorsement
+        + 0.12 * verification
+        + 0.10 * human_review
+        + 0.10 * skill
+        + 0.10 * proof,
         4,
     )
-    if overall >= 0.92 and verification == 1.0 and ledger.decision_gate != "needs_more_info":
+    if human_review == 0.0 and review_state.required:
+        status = "diverged"
+    elif (
+        overall >= 0.92
+        and verification == 1.0
+        and human_review == 1.0
+        and ledger.decision_gate != "needs_more_info"
+    ):
         status = "verified"
-    elif overall >= 0.82 and formal >= 1.0:
+    elif overall >= 0.82 and formal >= 1.0 and human_review >= 0.25:
         status = "executable"
     elif overall >= 0.45:
         status = "negotiating"
@@ -708,6 +1391,9 @@ def compute_spec_convergence(ledger: SpecLedger) -> SpecConvergenceState:
         formalization_resolution=round(formal, 4),
         endorsement_resolution=round(endorsement, 4),
         verification_resolution=round(verification, 4),
+        human_review_resolution=round(human_review, 4),
+        skill_compatibility_resolution=round(skill, 4),
+        proof_obligation_resolution=round(proof, 4),
         overall=overall,
         status=status,
     )

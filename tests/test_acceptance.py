@@ -166,6 +166,20 @@ def test_physical_commodity_offer_builds_trader_decision_frame() -> None:
     assert any("Umm Qasr" in item.query for item in ledger.search_plan)
     assert any("Price benchmark" in item.purpose for item in ledger.search_plan)
     assert any(source.name == "model_hypothesis" for source in ledger.evidence_sources)
+    assert ledger.human_review.required
+    assert ledger.human_review.status == "queued"
+    assert ledger.human_review.risk_level == "high"
+    assert ledger.human_review.blocking_evidence
+    assert any(item.stage_id == "human_review" and item.status == "blocked" for item in ledger.game_states)
+    assert ledger.proof_obligations
+    assert any(item.source_type == "evidence" for item in ledger.proof_obligations)
+    assert any(item.stage_id == "proof_obligations" for item in ledger.game_states)
+    assert ledger.equilibrium_diagnostics.recommended_action == "review"
+    assert ledger.equilibrium_diagnostics.payoffs
+    assert ledger.skill_compatibility.inferred_role == "commodity trader"
+    assert ledger.skill_compatibility.handoff_format == "review_packet"
+    assert ledger.skill_compatibility.next_best_action == "review"
+    assert ledger.skill_compatibility.compatibility_risks
 
 
 def test_mutual_spec_game_state_is_materialized_from_query() -> None:
@@ -184,5 +198,15 @@ def test_mutual_spec_game_state_is_materialized_from_query() -> None:
     assert "architecture_specification_game" in belief_ids
     assert ledger.commitments
     assert ledger.claim_graph
+    assert ledger.proof_obligations is not None
+    assert ledger.equilibrium_diagnostics.recommended_action in {
+        "ask",
+        "retrieve",
+        "review",
+        "propose",
+        "finalize",
+        "defer",
+    }
     assert ledger.user_endorsement.endorsed_fields
+    assert ledger.skill_compatibility.handoff_format == "implementation_plan"
     assert ledger.spec_convergence.overall > 0

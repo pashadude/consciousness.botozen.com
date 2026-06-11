@@ -48,6 +48,21 @@ def test_trader_formalization_can_validate_complete_decision_frame() -> None:
     assert record.class_id == 243
 
 
+def test_physical_offer_formalization_maps_sulfur_and_fob_cargo() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "Look i have an offer of 50000 tonns of sulfur in Iraq, Umm Qasr, fob 550, should i go for it?",
+    )
+
+    record = formalize_ledger(ledger)
+
+    assert "sulfur" in record.problem["detected_instruments"]
+    assert "FOB physical cargo" in record.problem["detected_instruments"]
+    assert "physical_offer" in record.problem["detected_actions"]
+    assert "instrument_mapping" not in record.missing_obligations
+
+
 def test_draft_and_verifier_surface_formalization_records() -> None:
     ledger = SpecLedger()
     update_ledger_from_user_text(ledger, "look at HO/RB arb and give me risk on this spread")
@@ -82,6 +97,13 @@ def test_mutual_specification_game_formalization_checks_architecture_obligations
     assert record.metrics["coverage"] == 1.0
     assert "players" in record.answer["obligations"]
     assert "claim_graph" in record.answer["obligations"]
+    assert "proof_obligations" in record.answer["obligations"]
+    assert "equilibrium_diagnostics" in record.answer["obligations"]
+    assert "human_review_gate" in record.answer["obligations"]
+    assert "skill_compatible_handoff" in record.answer["obligations"]
+    assert record.hypothesis["human_review"]["assigned_player"] == "human_reviewer"
+    assert record.hypothesis["skill_compatibility"]["handoff_format"] == "implementation_plan"
+    assert record.hypothesis["equilibrium_diagnostics"]["recommended_action"]
 
 
 def test_verifier_blocks_ready_gate_when_formal_obligations_are_missing() -> None:

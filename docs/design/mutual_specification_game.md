@@ -56,13 +56,39 @@ not only as prose in the prompt.
 | `latent_type_beliefs` | Bayesian games / Harsanyi types | The system keeps a normalized belief distribution over possible hidden task types inferred from the query signal. |
 | `commitments` | Signaling and commitment game | Goal, audience, format, constraints, and verification obligations are explicit commitments instead of implicit prompt interpretation. |
 | `claim_graph` | Proof-carrying response | Claims are typed as fact, assumption, inference, constraint, or decision gate and carry support IDs plus verifier state. |
+| `proof_obligations` | Proof-carrying response | Evidence gaps, unsupported claims, missing formal obligations, review approvals, artifact inspections, and verifier findings become explicit work items. |
+| `equilibrium_diagnostics` | Multicriteria domination | Candidate next actions are scored by specification gain, risk reduction, user burden, latency, and policy penalty; dominated actions are marked. |
 | `user_endorsement` | Anti-revealed-preference guard | Resolved, pending, and rejected fields are tracked separately from mere user engagement. |
-| `spec_convergence` | Convergence objective | Material fields, evidence, formalization, endorsement, and verification produce a compact convergence state. |
+| `human_review` | Skill-compatible human-AI collaboration | High-stakes or blocked specs produce a reviewer packet with risk, reasons, blocking claims, blocking evidence, and approval conditions. |
+| `skill_compatibility` | Designing skill-compatible AI | The agent records inferred role, skill level, cognitive burden, handoff format, compatibility risks, and next action. |
+| `spec_convergence` | Convergence objective | Material fields, evidence, formalization, endorsement, verification, review, and skill compatibility produce a compact convergence state. |
 
 This is not a formal equilibrium solver and not a Lean/Coq proof assistant.
 It is the executable MVP version of the theory: the agent exposes the current
 state of the specification game, blocks unsupported claims, and routes deeper
 work when the convergence state is not strong enough.
+
+## Implementation Priority
+
+The remaining theory machinery should be implemented in this order:
+
+| Priority | Layer | Why first |
+| --- | --- | --- |
+| 1 | Human-review gate and UI | High-stakes trader decisions need a visible operator packet before any proof or equilibrium work is useful. |
+| 2 | Skill-compatible user model | The agent must adapt detail, burden, and handoff format to what the user can verify and carry forward. |
+| 3 | Proof-carrying verifier structure | Claims, assumptions, support, and tests should become stricter and more machine-checkable before adding external theorem tools. |
+| 4 | Formal equilibrium diagnostics | Useful for auditing routing and commitment incentives, but not required for the first production decision gate. |
+| 5 | Lean/Coq bridge | Reserve for narrow, formalizable claims; most market and logistics claims remain empirical rather than theorem-proving problems. |
+
+Priority 1 is implemented in the MVP as `SpecLedger.human_review` plus the
+console's Human Review Queue panel. Priority 2 is implemented as
+`SpecLedger.skill_compatibility` plus the console's Skill Compatibility panel.
+Priority 3 is implemented as `SpecLedger.proof_obligations` plus the console's
+Proof Obligations panel. Priority 4 is implemented as
+`SpecLedger.equilibrium_diagnostics` plus the console's Equilibrium Diagnostics
+panel. This is a multicriteria action-dominance diagnostic, not a full
+equilibrium solver. The skill state is currently deterministic and
+learner-ready; it does not yet train from historical reviewer/user outcomes.
 
 ## Formalization Task Contract
 

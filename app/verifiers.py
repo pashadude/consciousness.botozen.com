@@ -52,6 +52,10 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
     belief_lines = format_latent_belief_lines(ledger)
     commitment_lines = format_commitment_lines(ledger)
     claim_graph_lines = format_claim_graph_lines(ledger)
+    proof_obligation_lines = format_proof_obligation_lines(ledger)
+    equilibrium_lines = format_equilibrium_lines(ledger)
+    human_review_lines = format_human_review_lines(ledger)
+    skill_compatibility_lines = format_skill_compatibility_lines(ledger)
     verification_condition_lines = format_optional_lines(
         ledger.verification_conditions,
         empty="- Standard verifier conditions only.",
@@ -100,6 +104,18 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
             "Claim Graph",
             claim_graph_lines,
             "",
+            "Proof Obligations",
+            proof_obligation_lines,
+            "",
+            "Equilibrium Diagnostics",
+            equilibrium_lines,
+            "",
+            "Human Review",
+            human_review_lines,
+            "",
+            "Skill Compatibility",
+            skill_compatibility_lines,
+            "",
             "Formalization",
             formalization_lines,
             "",
@@ -133,7 +149,10 @@ def format_game_state_lines(ledger: SpecLedger) -> str:
         f"evidence={convergence.evidence_resolution:.2f}, "
         f"formal={convergence.formalization_resolution:.2f}, "
         f"endorsement={convergence.endorsement_resolution:.2f}, "
-        f"verification={convergence.verification_resolution:.2f})"
+        f"verification={convergence.verification_resolution:.2f}, "
+        f"human_review={convergence.human_review_resolution:.2f}, "
+        f"skill={convergence.skill_compatibility_resolution:.2f}, "
+        f"proof={convergence.proof_obligation_resolution:.2f})"
     )
     return "\n".join(lines)
 
@@ -164,6 +183,83 @@ def format_claim_graph_lines(ledger: SpecLedger) -> str:
         + (f" supports={', '.join(item.support_ids)}" if item.support_ids else "")
         for item in ledger.claim_graph[:16]
     )
+
+
+def format_proof_obligation_lines(ledger: SpecLedger) -> str:
+    if not ledger.proof_obligations:
+        return "- No proof obligations generated."
+    return "\n".join(
+        f"- [{item.obligation_id}] {item.source_type}/{item.status}: {item.statement}"
+        + (f" remediation={item.remediation}" if item.remediation else "")
+        for item in ledger.proof_obligations[:16]
+    )
+
+
+def format_equilibrium_lines(ledger: SpecLedger) -> str:
+    diagnostic = ledger.equilibrium_diagnostics
+    payoff_lines = [
+        (
+            f"- {item.action}: dominated={item.dominated}; "
+            f"spec_gain={item.specification_gain:.2f}; "
+            f"risk_reduction={item.risk_reduction:.2f}; "
+            f"burden={item.user_burden:.2f}; latency={item.latency_cost:.2f}; "
+            f"policy={item.policy_penalty:.2f}"
+        )
+        for item in diagnostic.payoffs
+    ]
+    conflicts = " | ".join(diagnostic.unresolved_conflicts) or "none"
+    return "\n".join(
+        [
+            f"- solution_concept: {diagnostic.solution_concept}",
+            f"- recommended_action: {diagnostic.recommended_action}",
+            f"- dominated_actions: {', '.join(diagnostic.dominated_actions) or 'none'}",
+            f"- unresolved_conflicts: {conflicts}",
+            f"- rationale: {diagnostic.rationale}",
+            *payoff_lines,
+        ]
+    )
+
+
+def format_human_review_lines(ledger: SpecLedger) -> str:
+    review = ledger.human_review
+    lines = [
+        f"- required: {review.required}",
+        f"- status: {review.status}",
+        f"- risk_level: {review.risk_level}",
+        f"- assigned_player: {review.assigned_player}",
+        f"- decision_owner: {review.decision_owner}",
+    ]
+    if review.reasons:
+        lines.append("- reasons: " + " | ".join(review.reasons))
+    if review.required_actions:
+        lines.append("- required_actions: " + " | ".join(review.required_actions[:8]))
+    if review.blocking_claim_ids:
+        lines.append("- blocking_claim_ids: " + ", ".join(review.blocking_claim_ids[:8]))
+    if review.blocking_evidence:
+        lines.append("- blocking_evidence: " + " | ".join(review.blocking_evidence[:8]))
+    return "\n".join(lines)
+
+
+def format_skill_compatibility_lines(ledger: SpecLedger) -> str:
+    skill = ledger.skill_compatibility
+    lines = [
+        f"- inferred_role: {skill.inferred_role}",
+        f"- skill_level: {skill.skill_level}",
+        f"- domain_familiarity: {skill.domain_familiarity}",
+        f"- cognitive_burden: {skill.cognitive_burden}",
+        f"- recommended_depth: {skill.recommended_depth}",
+        f"- handoff_format: {skill.handoff_format}",
+        f"- next_best_action: {skill.next_best_action}",
+        f"- learned_from: {', '.join(skill.learned_from) or 'none'}",
+    ]
+    if skill.compatibility_risks:
+        lines.append("- compatibility_risks: " + " | ".join(skill.compatibility_risks[:6]))
+    if skill.evidence_required_for_handoff:
+        lines.append(
+            "- evidence_required_for_handoff: "
+            + " | ".join(skill.evidence_required_for_handoff[:6])
+        )
+    return "\n".join(lines)
 
 
 def format_optional_lines(items: list[str], *, empty: str) -> str:
@@ -280,6 +376,36 @@ def verify_draft(ledger: SpecLedger, draft: str) -> VerificationResult:
                     + ", ".join(item.claim_id for item in unsupported_claims[:5])
                 ),
                 remediation="Attach evidence, downgrade to assumption, or keep the gate blocked.",
+            )
+        )
+    if ledger.human_review.required and ledger.human_review.status != "approved":
+        severity = "high" if ledger.decision_gate != "needs_more_info" else "medium"
+        findings.append(
+            VerificationFinding(
+                category="trajectory",
+                severity=severity,
+                message=(
+                    "Human review is required but not approved; "
+                    f"status is {ledger.human_review.status}."
+                ),
+                remediation="Keep the decision gate blocked or obtain reviewer approval.",
+            )
+        )
+    open_proofs = [
+        item
+        for item in ledger.proof_obligations
+        if item.required and item.status not in {"satisfied", "waived"}
+    ]
+    if open_proofs and ledger.decision_gate != "needs_more_info":
+        findings.append(
+            VerificationFinding(
+                category="unsupported_claim",
+                severity="high",
+                message=(
+                    "Proof obligations remain open: "
+                    + ", ".join(item.obligation_id for item in open_proofs[:5])
+                ),
+                remediation="Satisfy, waive with rationale, or keep the gate blocked.",
             )
         )
     findings.extend(detect_uncited_external_claims(draft, ledger.evidence))
