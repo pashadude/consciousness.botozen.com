@@ -312,7 +312,6 @@ def detect_uncited_external_claims(
         r"\bresearch shows\b",
         r"\bstudies show\b",
         r"\bthe docs say\b",
-        r"\bsource\b",
     )
     citation_pattern = "|".join(re.escape(item.evidence_id) for item in evidence)
     for sentence in re.split(r"(?<=[.!?])\s+", draft):
