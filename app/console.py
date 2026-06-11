@@ -20,6 +20,7 @@ from app.cli_dashboard import (
     estimate_spend,
     google_status,
 )
+from app.conversation_log import persist_console_talk
 from app.formalization import formalize_ledger
 from app.jobs import enqueue_async_job
 from app.router import (
@@ -88,6 +89,12 @@ async def create_spec(
     artifacts = await save_uploads(files or [])
     text = combine_query_and_speech(query, speech_text, bool(artifacts))
     result = build_console_result(text, artifacts, speech_text)
+    persist_console_talk(
+        result=result,
+        raw_text=text,
+        speech_text=speech_text,
+        response_channel="html",
+    )
     return render_page(text=text, result=result, env=os.environ)
 
 
@@ -100,6 +107,12 @@ async def create_spec_json(
     artifacts = await save_uploads(files or [])
     text = combine_query_and_speech(query, speech_text, bool(artifacts))
     result = build_console_result(text, artifacts, speech_text)
+    persist_console_talk(
+        result=result,
+        raw_text=text,
+        speech_text=speech_text,
+        response_channel="json",
+    )
     return JSONResponse(
         {
             "ledger": result.ledger.model_dump(mode="json"),

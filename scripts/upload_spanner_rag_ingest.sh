@@ -31,4 +31,12 @@ gcloud storage cp "${INGEST_DIR}/documents.jsonl" "gs://${BUCKET}/documents.json
 gcloud storage cp "${INGEST_DIR}/chunks.jsonl" "gs://${BUCKET}/chunks.jsonl"
 gcloud storage cp "${INGEST_DIR}/manifest.json" "gs://${BUCKET}/manifest.json"
 
+if [[ -f "${INGEST_DIR}/user_talks_documents.jsonl" ]]; then
+  gcloud storage cp "${INGEST_DIR}/user_talks_documents.jsonl" "gs://${BUCKET}/user_talks_documents.jsonl"
+fi
+
+if [[ -f "${INGEST_DIR}/user_talks_chunks.jsonl" ]]; then
+  gcloud storage cp "${INGEST_DIR}/user_talks_chunks.jsonl" "gs://${BUCKET}/user_talks_chunks.jsonl"
+fi
+
 gcloud storage ls -l "gs://${BUCKET}"

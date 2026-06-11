@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID="${PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-zenpulsar}}"
+REGION="${REGION:-${GOOGLE_CLOUD_LOCATION:-us-central1}}"
+AR_LOCATION="${AR_LOCATION:-${REGION}}"
+AR_REPOSITORY="${AR_REPOSITORY:-mutual-spec}"
+IMAGE_NAME="${IMAGE_NAME:-mutual-spec-agent}"
+IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_URI="${IMAGE_URI:-${AR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${AR_REPOSITORY}/${IMAGE_NAME}:${IMAGE_TAG}}"
+JOB_NAME="${SPANNER_RAG_LOAD_JOB_NAME:-mutual-spec-spanner-rag-load}"
+LOADER_SA="${SPANNER_RAG_LOADER_SERVICE_ACCOUNT:-${CONSOLE_RUNTIME_SERVICE_ACCOUNT:-console-runtime@${PROJECT_ID}.iam.gserviceaccount.com}}"
+
+SPANNER_RAG_INSTANCE_ID="${SPANNER_RAG_INSTANCE_ID:-commodity-rag}"
+SPANNER_RAG_DATABASE_ID="${SPANNER_RAG_DATABASE_ID:-trader_rag}"
+SPANNER_RAG_DOCUMENTS_TABLE="${SPANNER_RAG_DOCUMENTS_TABLE:-RagDocuments}"
+SPANNER_RAG_CHUNKS_TABLE="${SPANNER_RAG_CHUNKS_TABLE:-RagChunks}"
+SPANNER_RAG_GCS_BUCKET="${SPANNER_RAG_GCS_BUCKET:-zenpulsar-spanner-rag-ingest}"
+SPANNER_RAG_LOAD_BATCH_SIZE="${SPANNER_RAG_LOAD_BATCH_SIZE:-2500}"
+SPANNER_RAG_LOAD_PROGRESS_EVERY="${SPANNER_RAG_LOAD_PROGRESS_EVERY:-25000}"
+SPANNER_RAG_LOAD_TIMEOUT="${SPANNER_RAG_LOAD_TIMEOUT:-86400}"
+SPANNER_RAG_LOAD_MEMORY="${SPANNER_RAG_LOAD_MEMORY:-2Gi}"
+SPANNER_RAG_LOAD_CPU="${SPANNER_RAG_LOAD_CPU:-2}"
+SPANNER_RAG_LOAD_ARGS="${SPANNER_RAG_LOAD_ARGS:-}"
+
+ENV_FILE="$(mktemp)"
+trap 'rm -f "${ENV_FILE}"' EXIT
+cat >"${ENV_FILE}" <<EOF
+GOOGLE_CLOUD_PROJECT: "${PROJECT_ID}"
+GOOGLE_CLOUD_LOCATION: "${REGION}"
+SPANNER_RAG_INSTANCE_ID: "${SPANNER_RAG_INSTANCE_ID}"
+SPANNER_RAG_DATABASE_ID: "${SPANNER_RAG_DATABASE_ID}"
+SPANNER_RAG_DOCUMENTS_TABLE: "${SPANNER_RAG_DOCUMENTS_TABLE}"
+SPANNER_RAG_CHUNKS_TABLE: "${SPANNER_RAG_CHUNKS_TABLE}"
+SPANNER_RAG_GCS_BUCKET: "${SPANNER_RAG_GCS_BUCKET}"
+EOF
+
+if gcloud run jobs describe "${JOB_NAME}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  ACTION="update"
+else
+  ACTION="deploy"
+fi
+
+gcloud run jobs "${ACTION}" "${JOB_NAME}" \
+  --image="${IMAGE_URI}" \
+  --region="${REGION}" \
+  --project="${PROJECT_ID}" \
+  --service-account="${LOADER_SA}" \
+  --command="mutual-spec-spanner-rag-load" \
+  --args="--batch-size,${SPANNER_RAG_LOAD_BATCH_SIZE},--progress-every,${SPANNER_RAG_LOAD_PROGRESS_EVERY}${SPANNER_RAG_LOAD_ARGS:+,${SPANNER_RAG_LOAD_ARGS}}" \
+  --tasks=1 \
+  --parallelism=1 \
+  --max-retries=0 \
+  --task-timeout="${SPANNER_RAG_LOAD_TIMEOUT}" \
+  --cpu="${SPANNER_RAG_LOAD_CPU}" \
+  --memory="${SPANNER_RAG_LOAD_MEMORY}" \
+  --env-vars-file="${ENV_FILE}" \
+  --quiet
+
+echo "Spanner RAG load job configured: ${JOB_NAME}"

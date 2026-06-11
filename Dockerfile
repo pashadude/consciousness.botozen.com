@@ -13,6 +13,7 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 COPY pyproject.toml uv.lock README.md ./
 COPY app ./app
 COPY config ./config
+COPY scripts ./scripts
 COPY sql ./sql
 
 RUN uv sync --frozen --no-dev

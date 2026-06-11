@@ -63,8 +63,9 @@ done
 for role in \
   roles/bigquery.dataViewer \
   roles/bigquery.jobUser \
+  roles/spanner.databaseUser \
   roles/aiplatform.user \
-  roles/spanner.databaseReader \
+  roles/storage.objectViewer \
   roles/storage.objectCreator \
   roles/secretmanager.secretAccessor; do
   gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
@@ -142,4 +143,7 @@ SPANNER_RAG_DOCUMENTS_TABLE=RagDocuments
 SPANNER_RAG_CHUNKS_TABLE=RagChunks
 SPANNER_RAG_EMBEDDING_MODEL=RagEmbeddingModel
 SPANNER_RAG_GCS_BUCKET=zenpulsar-spanner-rag-ingest
+USER_TALKS_RAG_LOG_ENABLED=true
+USER_TALKS_GCS_BUCKET=zenpulsar-spanner-rag-ingest
+USER_TALKS_GCS_PREFIX=user_talks
 EOF
