@@ -484,7 +484,7 @@ SPANNER_RAG_DOCUMENTS_TABLE=RagDocuments
 SPANNER_RAG_CHUNKS_TABLE=RagChunks
 SPANNER_RAG_EMBEDDING_MODEL=RagEmbeddingModel
 TRADER_SOURCE_LAYER_CONFIG=config/trader_source_layer.yaml
-MCP_RESEARCH_COMMAND=python -m opoint_mcp.server
+MCP_RESEARCH_COMMAND=/app/.venv/bin/python -m opoint_mcp.server
 ```
 
 If you later create an Agent Search app/engine as an alternate private corpus,
@@ -638,7 +638,7 @@ Do these in order. The first group is required for the current multimodal ADK ag
 | `google_agent_search` | Vertex AI API plus ADK/Agent Runtime credentials | `GOOGLE_AGENT_SEARCH_ENABLED=true` |
 | `google_cse` | Google Cloud Console -> APIs & Services -> Library -> Custom Search API | `GOOGLE_SEARCH_CX`, `GOOGLE_SEARCH_API_KEY` |
 | `vertex_ai_search` | Optional Vertex AI Search / Agent Builder data store | `VERTEX_AI_SEARCH_DATA_STORE_ID` or `VERTEX_AI_SEARCH_ENGINE_ID` |
-| `mcp` / Opoint | Vendored Opoint MCP server or remote MCP server | `TRADER_RAG_PROVIDER=mcp` or `spanner_rag,mcp`, `MCP_RESEARCH_COMMAND=python -m opoint_mcp.server`, plus `OPOINT_API_KEY` for Opoint |
+| `mcp` / Opoint | Vendored Opoint MCP server or remote MCP server | `TRADER_RAG_PROVIDER=mcp` or `spanner_rag,mcp`, `MCP_RESEARCH_COMMAND=python -m opoint_mcp.server` locally or `/app/.venv/bin/python -m opoint_mcp.server` in Cloud Run, plus `OPOINT_API_KEY` for Opoint |
 
 5. Enable deployment APIs if you want Agent Runtime or Cloud Run:
 

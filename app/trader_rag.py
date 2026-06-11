@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -137,7 +138,7 @@ def load_trader_source_config(env: Mapping[str, str] | None = None) -> TraderSou
         env_key="opoint_command_env",
     )
     if not mcp_research_command and opoint_api_key:
-        mcp_research_command = "python -m opoint_mcp.server"
+        mcp_research_command = default_opoint_mcp_command()
     return TraderSourceConfig(
         provider=provider.strip().lower(),
         google_agent_search_enabled=parse_bool(
@@ -499,7 +500,7 @@ def run_mcp_provider(
             queries=queries,
             required_evidence=required_evidence,
             warnings=[
-                "MCP RAG needs MCP_RESEARCH_URL or MCP_RESEARCH_COMMAND. For vendored Opoint, set OPOINT_API_KEY and use MCP_RESEARCH_COMMAND='python -m opoint_mcp.server'.",
+                "MCP RAG needs MCP_RESEARCH_URL or MCP_RESEARCH_COMMAND. For vendored Opoint, set OPOINT_API_KEY and use MCP_RESEARCH_COMMAND='python -m opoint_mcp.server' locally or '/app/.venv/bin/python -m opoint_mcp.server' in Cloud Run.",
             ],
         )
     if (
@@ -523,7 +524,9 @@ def run_mcp_provider(
                 fetch_mcp_search_records(query, config=config, limit=per_query_limit)
             )
         except Exception as exc:
-            warnings.append(f"MCP search failed for `{query}`: {exc}")
+            warnings.append(
+                f"MCP search failed for `{query}`: {exception_summary(exc)}"
+            )
             continue
         evidence.extend(
             normalize_mcp_record(record, query=query, index=index)
@@ -562,6 +565,18 @@ def run_async_mcp(coro: Any) -> Any:
     if errors:
         raise errors[0]
     return result[0] if result else None
+
+
+def default_opoint_mcp_command() -> str:
+    return f"{shlex.quote(sys.executable)} -m opoint_mcp.server"
+
+
+def exception_summary(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        parts = [exception_summary(item) for item in exc.exceptions]
+        return "; ".join(part for part in parts if part) or str(exc)
+    text = str(exc).strip()
+    return f"{exc.__class__.__name__}: {text}" if text else exc.__class__.__name__
 
 
 async def fetch_mcp_search_records(

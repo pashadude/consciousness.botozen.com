@@ -5,6 +5,8 @@ from app.spec_state import SpecLedger, update_ledger_from_user_text
 from app.trader_rag import (
     SearchEvidence,
     apply_rag_to_ledger,
+    default_opoint_mcp_command,
+    exception_summary,
     load_trader_source_config,
     mcp_search_arguments,
     records_from_mcp_payload,
@@ -229,6 +231,21 @@ def test_opoint_mcp_search_arguments_strip_boolean_quotes() -> None:
     )
 
     assert args == {"search_text": "sulfur Umm Qasr FOB price", "num_articles": 5}
+
+
+def test_default_opoint_mcp_command_uses_current_interpreter() -> None:
+    command = default_opoint_mcp_command()
+
+    assert command.endswith(" -m opoint_mcp.server")
+    assert "python" in command
+
+
+def test_exception_summary_expands_exception_group() -> None:
+    summary = exception_summary(
+        ExceptionGroup("mcp failed", [RuntimeError("child import failed")])
+    )
+
+    assert summary == "RuntimeError: child import failed"
 
 
 def test_joined_spanner_and_mcp_provider_merges_evidence(monkeypatch) -> None:
