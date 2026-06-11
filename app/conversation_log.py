@@ -43,6 +43,15 @@ def persist_console_talk(
         "verification_conditions": ledger.verification_conditions,
         "assumptions": ledger.assumptions,
         "artifact_refs": [item.model_dump(mode="json") for item in ledger.artifact_refs],
+        "game_players": [item.model_dump(mode="json") for item in ledger.game_players],
+        "game_states": [item.model_dump(mode="json") for item in ledger.game_states],
+        "latent_type_beliefs": [
+            item.model_dump(mode="json") for item in ledger.latent_type_beliefs
+        ],
+        "commitments": [item.model_dump(mode="json") for item in ledger.commitments],
+        "claim_graph": [item.model_dump(mode="json") for item in ledger.claim_graph],
+        "user_endorsement": ledger.user_endorsement.model_dump(mode="json"),
+        "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
         "route_history": [item.model_dump(mode="json") for item in ledger.route_history],
         "source_layer": {
             "provider": result.rag_result.provider,

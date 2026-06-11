@@ -116,6 +116,87 @@ class RouteRecord(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
+class GamePlayer(BaseModel):
+    """Player in the many-person coordination game."""
+
+    player_id: str
+    role: str
+    objective: str
+    private_information: list[str] = Field(default_factory=list)
+    action_space: list[str] = Field(default_factory=list)
+
+
+class GameStageState(BaseModel):
+    """Explicit state for one staged game in the specification process."""
+
+    stage_id: str
+    game_type: str
+    objective: str
+    success_condition: str
+    status: Literal["open", "active", "blocked", "satisfied"] = "open"
+    blocking_conditions: list[str] = Field(default_factory=list)
+
+
+class LatentTypeBelief(BaseModel):
+    """Harsanyi-style belief over possible latent task types."""
+
+    type_id: str
+    description: str
+    probability: float
+    evidence_signals: list[str] = Field(default_factory=list)
+    next_best_action: Literal["ask", "assume", "retrieve", "propose", "verify"] = "ask"
+
+
+class CommitmentRecord(BaseModel):
+    """A commitment made by the user, agent, router, tool, or verifier."""
+
+    commitment_id: str
+    player_id: str
+    field: str
+    value: str
+    status: Literal["proposed", "accepted", "needs_confirmation", "rejected"] = "proposed"
+    source: Literal["user", "agent", "tool", "verifier", "system"] = "agent"
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
+class ClaimRecord(BaseModel):
+    """Claim graph node for proof-carrying responses."""
+
+    claim_id: str
+    text: str
+    claim_type: Literal["fact", "assumption", "inference", "constraint", "decision_gate"]
+    support_ids: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+    verifier_state: Literal[
+        "unverified",
+        "supported",
+        "needs_evidence",
+        "blocked",
+        "refuted",
+    ] = "unverified"
+
+
+class UserEndorsementState(BaseModel):
+    """Whether the user has endorsed the current shared specification."""
+
+    endorsed_fields: list[str] = Field(default_factory=list)
+    rejected_fields: list[str] = Field(default_factory=list)
+    pending_fields: list[str] = Field(default_factory=list)
+    last_signal: str | None = None
+
+
+class SpecConvergenceState(BaseModel):
+    """Compact convergence score for q -> theta -> executable specification."""
+
+    material_resolution: float = 0.0
+    evidence_resolution: float = 0.0
+    formalization_resolution: float = 0.0
+    endorsement_resolution: float = 0.0
+    verification_resolution: float = 0.0
+    overall: float = 0.0
+    status: Literal["diverged", "negotiating", "executable", "verified"] = "diverged"
+
+
 class AsyncJobRef(BaseModel):
     """Reference to deferred work kicked off by a light-model route decision."""
 
@@ -145,7 +226,7 @@ class FormalizationRecord(BaseModel):
     """Problem/question/answer formalization record for a spec-game task."""
 
     task_name: str
-    domain: Literal["general", "trader"]
+    domain: Literal["general", "trader", "mutual_spec"]
     problem: dict[str, Any] = Field(default_factory=dict)
     question: str | None = None
     answer: dict[str, Any] = Field(default_factory=dict)
@@ -199,6 +280,13 @@ class SpecLedger(BaseModel):
     evidence_sources: list[EvidenceSourceStatus] = Field(default_factory=list)
     evidence: list[EvidenceRef] = Field(default_factory=list)
     evidence_used: list[str] = Field(default_factory=list)
+    game_players: list[GamePlayer] = Field(default_factory=list)
+    game_states: list[GameStageState] = Field(default_factory=list)
+    latent_type_beliefs: list[LatentTypeBelief] = Field(default_factory=list)
+    commitments: list[CommitmentRecord] = Field(default_factory=list)
+    claim_graph: list[ClaimRecord] = Field(default_factory=list)
+    user_endorsement: UserEndorsementState = Field(default_factory=UserEndorsementState)
+    spec_convergence: SpecConvergenceState = Field(default_factory=SpecConvergenceState)
     route_history: list[RouteRecord] = Field(default_factory=list)
     async_jobs: list[AsyncJobRef] = Field(default_factory=list)
     formalization_records: list[FormalizationRecord] = Field(default_factory=list)
@@ -238,7 +326,391 @@ def record_stage(ledger: SpecLedger, stage: str) -> SpecLedger:
 def add_route(ledger: SpecLedger, route: RouteRecord) -> SpecLedger:
     ledger.route_history.append(route)
     ledger.route_history = ledger.route_history[-MAX_TRACE_STEPS:]
+    update_mutual_spec_game_state(ledger)
     return ledger
+
+
+def update_mutual_spec_game_state(ledger: SpecLedger) -> SpecLedger:
+    """Materialize the game-theory layer from the compact spec ledger.
+
+    This is deliberately deterministic: it gives the model and verifier an
+    inspectable state object rather than hiding the specification game in a
+    prompt. It is not an equilibrium solver or a theorem prover.
+    """
+
+    ensure_game_players(ledger)
+    ledger.latent_type_beliefs = infer_latent_type_beliefs(ledger)
+    sync_commitments(ledger)
+    sync_claim_graph(ledger)
+    sync_user_endorsement(ledger)
+    ledger.game_states = build_game_states(ledger)
+    ledger.spec_convergence = compute_spec_convergence(ledger)
+    return ledger
+
+
+def ensure_game_players(ledger: SpecLedger) -> None:
+    if ledger.game_players:
+        return
+    ledger.game_players = [
+        GamePlayer(
+            player_id="user",
+            role="compressed signal owner",
+            objective="Minimize cognitive difference between latent task and shared executable spec.",
+            private_information=["latent task theta", "risk tolerance", "decision context"],
+            action_space=["ask", "answer clarification", "endorse", "reject", "supply artifacts"],
+        ),
+        GamePlayer(
+            player_id="main_agent",
+            role="specification mediator",
+            objective="Convert q into candidate theta and executable s with minimal user burden.",
+            private_information=["model uncertainty", "retrieval gaps", "verification findings"],
+            action_space=["ask", "assume", "retrieve", "draft", "verify", "defer"],
+        ),
+        GamePlayer(
+            player_id="router",
+            role="model/tool allocator",
+            objective="Maximize expected specification gain under cost, latency, risk, and policy constraints.",
+            action_space=["cheap_model", "strong_model", "tool", "async_job", "human_review"],
+        ),
+        GamePlayer(
+            player_id="verifier",
+            role="adversarial checker",
+            objective="Block unsupported, unsafe, or underspecified claims before finalization.",
+            action_space=["pass", "flag", "block", "request_repair"],
+        ),
+        GamePlayer(
+            player_id="tool_layer",
+            role="evidence producer",
+            objective="Provide cited evidence with freshness, confidence, and source limitations.",
+            action_space=["search", "retrieve", "inspect_artifact", "return_empty", "fail_closed"],
+        ),
+        GamePlayer(
+            player_id="human_reviewer",
+            role="high-stakes reviewer",
+            objective="Preserve human decision ownership when risk or ambiguity remains high.",
+            action_space=["approve", "reject", "request_more_evidence", "take_over"],
+        ),
+    ]
+
+
+def infer_latent_type_beliefs(ledger: SpecLedger) -> list[LatentTypeBelief]:
+    text = (ledger.expressed_query or ledger.user_request).lower()
+    candidates: list[tuple[str, str, float, list[str], str]] = [
+        (
+            "general_specification",
+            "User wants a general executable task specification.",
+            0.15,
+            ["default prior"],
+            "ask",
+        )
+    ]
+    if looks_like_trader_query(text):
+        candidates.append(
+            (
+                "trader_decision_frame",
+                "Trader needs a proof-carrying decision frame rather than a direct answer.",
+                0.35,
+                matched_signals(text, ("trader", "trade", "risk", "spread", "offer", "fob")),
+                "retrieve",
+            )
+        )
+    if any(token in text for token in ("sulfur", "sulphur", "umm qasr", "fob", "ton", "offer")):
+        candidates.append(
+            (
+                "physical_commodity_offer",
+                "Compressed physical commodity offer requiring price, logistics, documents, counterparty, and sanctions verification.",
+                0.3,
+                matched_signals(text, ("sulfur", "sulphur", "umm qasr", "fob", "offer")),
+                "retrieve",
+            )
+        )
+    if any(token in text for token in ("arb", "arbitrage", "ho/rb", "spread", "basis", "brent", "wti")):
+        candidates.append(
+            (
+                "relative_value_or_spread",
+                "Relative-value or spread analysis requiring instrument mapping, timeframe, risk, and falsification triggers.",
+                0.25,
+                matched_signals(text, ("arb", "arbitrage", "ho/rb", "spread", "basis", "brent", "wti")),
+                "retrieve",
+            )
+        )
+    if any(token in text for token in ("mutual specification", "specification game", "latent intent", "game theory")):
+        candidates.append(
+            (
+                "architecture_specification_game",
+                "User wants the Mutual Specification Game itself implemented as inspectable coordination mechanics.",
+                0.4,
+                matched_signals(text, ("mutual specification", "specification game", "latent intent", "game theory")),
+                "propose",
+            )
+        )
+    if any(token in text for token in ("implement", "build", "code", "deploy")):
+        candidates.append(
+            (
+                "implementation_task",
+                "User expects code changes, tests, and deployment rather than an explanatory answer.",
+                0.22,
+                matched_signals(text, ("implement", "build", "code", "deploy")),
+                "verify",
+            )
+        )
+    total = sum(weight for _, _, weight, _, _ in candidates) or 1.0
+    beliefs = [
+        LatentTypeBelief(
+            type_id=type_id,
+            description=description,
+            probability=round(weight / total, 4),
+            evidence_signals=signals or ["prior"],
+            next_best_action=next_action,  # type: ignore[arg-type]
+        )
+        for type_id, description, weight, signals, next_action in candidates
+    ]
+    return sorted(beliefs, key=lambda item: item.probability, reverse=True)
+
+
+def matched_signals(text: str, tokens: tuple[str, ...]) -> list[str]:
+    return [token for token in tokens if token in text]
+
+
+def sync_commitments(ledger: SpecLedger) -> None:
+    commitments: list[CommitmentRecord] = []
+    for field in MATERIAL_FIELDS:
+        value = getattr(ledger, field)
+        if not value:
+            continue
+        status = "accepted" if not any(item.field == field for item in ledger.ambiguities) else "needs_confirmation"
+        commitments.append(
+            CommitmentRecord(
+                commitment_id=f"commit:{stable_id(f'{field}:{value}')}",
+                player_id="user" if status == "accepted" else "main_agent",
+                field=field,
+                value=str(value),
+                status=status,
+                source="user" if status == "accepted" else "agent",
+            )
+        )
+    for index, item in enumerate(ledger.constraints[:12]):
+        commitments.append(
+            CommitmentRecord(
+                commitment_id=f"commit:{stable_id(f'constraint:{item}')}",
+                player_id="main_agent",
+                field=f"constraint:{index}",
+                value=item,
+                status="accepted",
+                source="system",
+            )
+        )
+    for index, item in enumerate(ledger.verification_conditions[:12]):
+        commitments.append(
+            CommitmentRecord(
+                commitment_id=f"commit:{stable_id(f'verification:{item}')}",
+                player_id="verifier",
+                field=f"verification_condition:{index}",
+                value=item,
+                status="accepted",
+                source="verifier",
+            )
+        )
+    ledger.commitments = commitments[-MAX_TRACE_STEPS:]
+
+
+def sync_claim_graph(ledger: SpecLedger) -> None:
+    claims: list[ClaimRecord] = []
+    query = ledger.expressed_query or ledger.user_request
+    if query:
+        query_claim_id = f"claim:{stable_id('expressed_query:' + query)}"
+        claims.append(
+            ClaimRecord(
+                claim_id=query_claim_id,
+                text=f"Expressed query q: {query}",
+                claim_type="fact",
+                support_ids=["user_signal"],
+                verifier_state="supported",
+            )
+        )
+    else:
+        query_claim_id = ""
+    for belief in ledger.latent_type_beliefs[:5]:
+        claims.append(
+            ClaimRecord(
+                claim_id=f"claim:{stable_id('belief:' + belief.type_id)}",
+                text=f"Latent type belief {belief.type_id}: {belief.description} p={belief.probability}",
+                claim_type="inference",
+                support_ids=["user_signal"],
+                depends_on=[query_claim_id] if query_claim_id else [],
+                verifier_state="supported" if belief.evidence_signals != ["prior"] else "unverified",
+            )
+        )
+    for commitment in ledger.commitments[:20]:
+        claims.append(
+            ClaimRecord(
+                claim_id=f"claim:{stable_id('commitment:' + commitment.commitment_id)}",
+                text=f"Commitment {commitment.field}: {commitment.value}",
+                claim_type="constraint" if commitment.field.startswith("constraint") else "inference",
+                support_ids=[commitment.commitment_id],
+                verifier_state="supported" if commitment.status == "accepted" else "needs_evidence",
+            )
+        )
+    for evidence in ledger.evidence[:20]:
+        claims.append(
+            ClaimRecord(
+                claim_id=f"claim:{stable_id('evidence:' + evidence.evidence_id)}",
+                text=f"Evidence claim from {evidence.source_type}: {evidence.title}",
+                claim_type="fact",
+                support_ids=[evidence.evidence_id],
+                verifier_state="supported" if evidence.used else "unverified",
+            )
+        )
+    for assumption in ledger.assumptions[:12]:
+        claims.append(
+            ClaimRecord(
+                claim_id=f"claim:{stable_id('assumption:' + assumption)}",
+                text=assumption,
+                claim_type="assumption",
+                support_ids=[],
+                verifier_state="needs_evidence",
+            )
+        )
+    claims.append(
+        ClaimRecord(
+            claim_id=f"claim:{stable_id('gate:' + ledger.decision_gate)}",
+            text=f"Decision gate remains {ledger.decision_gate}.",
+            claim_type="decision_gate",
+            support_ids=[record.task_name for record in ledger.formalization_records[-1:]],
+            verifier_state="blocked" if ledger.decision_gate == "needs_more_info" else "unverified",
+        )
+    )
+    ledger.claim_graph = dedupe_claims(claims)[-MAX_TRACE_STEPS:]
+
+
+def dedupe_claims(claims: list[ClaimRecord]) -> list[ClaimRecord]:
+    seen: set[str] = set()
+    result: list[ClaimRecord] = []
+    for claim in claims:
+        if claim.claim_id in seen:
+            continue
+        seen.add(claim.claim_id)
+        result.append(claim)
+    return result
+
+
+def sync_user_endorsement(ledger: SpecLedger) -> None:
+    present = [field for field in MATERIAL_FIELDS if getattr(ledger, field)]
+    missing = [field for field in MATERIAL_FIELDS if not getattr(ledger, field)]
+    rejected = sorted({item.field for item in ledger.ambiguities if item.severity == "high"})
+    endorsed = [field for field in present if field not in rejected]
+    ledger.user_endorsement = UserEndorsementState(
+        endorsed_fields=endorsed,
+        rejected_fields=rejected,
+        pending_fields=missing,
+        last_signal=(ledger.expressed_query or ledger.user_request or None),
+    )
+
+
+def build_game_states(ledger: SpecLedger) -> list[GameStageState]:
+    material_missing = [field for field in MATERIAL_FIELDS if not getattr(ledger, field)]
+    required_search = [item for item in ledger.search_plan if item.required]
+    unsatisfied_search = [item.purpose for item in required_search if item.status != "satisfied"]
+    high_findings = [item.message for item in ledger.verification_findings if item.severity == "high"]
+    latest_formal = ledger.formalization_records[-1] if ledger.formalization_records else None
+    formal_missing = latest_formal.missing_obligations if latest_formal and latest_formal.is_valid != 1 else []
+    return [
+        GameStageState(
+            stage_id="elicitation",
+            game_type="cooperative_partial_information",
+            objective="Recover theta from lossy query q with minimal user burden.",
+            success_condition="Material fields and top latent type are explicit.",
+            status="blocked" if material_missing else "satisfied",
+            blocking_conditions=material_missing,
+        ),
+        GameStageState(
+            stage_id="dialogue_commitment",
+            game_type="signaling_commitment_under_asymmetric_information",
+            objective="Convert signals into explicit commitments and accepted assumptions.",
+            success_condition="Goal, audience, format, constraints, and proof obligations are committed.",
+            status="satisfied" if ledger.commitments and not material_missing else "active",
+            blocking_conditions=material_missing,
+        ),
+        GameStageState(
+            stage_id="retrieval",
+            game_type="evidence_selection_game",
+            objective="Select sources that reduce specification uncertainty.",
+            success_condition="Required evidence plan is satisfied or explicitly blocked.",
+            status="satisfied" if required_search and not unsatisfied_search else "active" if required_search else "open",
+            blocking_conditions=unsatisfied_search[:8],
+        ),
+        GameStageState(
+            stage_id="execution_graph",
+            game_type="full_information_graph_game",
+            objective="Run model, tool, verifier, async, and human-review nodes under explicit gates.",
+            success_condition="Formal obligations are complete before decision-ready output.",
+            status="blocked" if formal_missing else "satisfied" if latest_formal else "active",
+            blocking_conditions=formal_missing,
+        ),
+        GameStageState(
+            stage_id="verification",
+            game_type="adversarial_verification_game",
+            objective="Block unsupported claims, unsafe paths, and specification gaming.",
+            success_condition="No high-severity verifier findings remain.",
+            status="blocked" if high_findings else "satisfied" if ledger.verification_findings else "active",
+            blocking_conditions=high_findings,
+        ),
+    ]
+
+
+def compute_spec_convergence(ledger: SpecLedger) -> SpecConvergenceState:
+    material = sum(1 for field in MATERIAL_FIELDS if getattr(ledger, field)) / len(MATERIAL_FIELDS)
+    required_search = [item for item in ledger.search_plan if item.required]
+    evidence = (
+        sum(1 for item in required_search if item.status == "satisfied") / len(required_search)
+        if required_search
+        else 1.0
+    )
+    latest_formal = ledger.formalization_records[-1] if ledger.formalization_records else None
+    formal = float((latest_formal.metrics or {}).get("coverage", 0.0)) if latest_formal else 0.0
+    endorsement_total = (
+        len(ledger.user_endorsement.endorsed_fields)
+        + len(ledger.user_endorsement.pending_fields)
+        + len(ledger.user_endorsement.rejected_fields)
+    )
+    endorsement = (
+        len(ledger.user_endorsement.endorsed_fields) / endorsement_total
+        if endorsement_total
+        else 0.0
+    )
+    if any(item.severity == "high" for item in ledger.verification_findings):
+        verification = 0.0
+    elif ledger.verification_findings:
+        verification = 0.65
+    elif latest_formal and latest_formal.is_valid == 1:
+        verification = 1.0
+    else:
+        verification = 0.25
+    overall = round(
+        0.22 * material
+        + 0.22 * evidence
+        + 0.24 * formal
+        + 0.12 * endorsement
+        + 0.20 * verification,
+        4,
+    )
+    if overall >= 0.92 and verification == 1.0 and ledger.decision_gate != "needs_more_info":
+        status = "verified"
+    elif overall >= 0.82 and formal >= 1.0:
+        status = "executable"
+    elif overall >= 0.45:
+        status = "negotiating"
+    else:
+        status = "diverged"
+    return SpecConvergenceState(
+        material_resolution=round(material, 4),
+        evidence_resolution=round(evidence, 4),
+        formalization_resolution=round(formal, 4),
+        endorsement_resolution=round(endorsement, 4),
+        verification_resolution=round(verification, 4),
+        overall=overall,
+        status=status,
+    )
 
 
 def text_from_content(content: Any) -> str:
@@ -277,6 +749,7 @@ def update_ledger_from_user_text(
             ledger.artifact_refs.append(artifact)
     ledger.ambiguities = detect_material_ambiguities(ledger)
     ledger.status = "clarifying" if ledger.ambiguities else "retrieving"
+    update_mutual_spec_game_state(ledger)
     return ledger
 
 
@@ -294,6 +767,7 @@ def apply_clarification_answer(ledger: SpecLedger, answer: str | dict[str, Any])
         infer_spec_fields(ledger, text, fill_only=True)
     ledger.ambiguities = detect_material_ambiguities(ledger)
     ledger.status = "retrieving" if not ledger.ambiguities else "clarifying"
+    update_mutual_spec_game_state(ledger)
     return ledger
 
 
@@ -774,6 +1248,7 @@ def add_external_evidence(
     ledger.evidence.append(evidence)
     satisfy_search_plan_from_query(ledger, query)
     refresh_evidence_used(ledger)
+    update_mutual_spec_game_state(ledger)
     return evidence
 
 
@@ -853,6 +1328,7 @@ def add_evidence_from_artifacts(ledger: SpecLedger) -> SpecLedger:
             )
         )
     refresh_evidence_used(ledger)
+    update_mutual_spec_game_state(ledger)
     return ledger
 
 
@@ -882,4 +1358,5 @@ def add_mcp_evidence_placeholder(ledger: SpecLedger, source_uri: str) -> SpecLed
             )
         )
     refresh_evidence_used(ledger)
+    update_mutual_spec_game_state(ledger)
     return ledger

@@ -1,5 +1,6 @@
 from app.formalization import FORMALIZATION_REGISTRY, formalize_ledger
-from app.spec_state import SpecLedger, update_ledger_from_user_text
+from app.router import route_for_stage
+from app.spec_state import SpecLedger, add_route, update_ledger_from_user_text
 from app.verifiers import build_draft_from_ledger, verify_draft
 
 
@@ -61,6 +62,26 @@ def test_draft_and_verifier_surface_formalization_records() -> None:
     assert result.passed
     assert any("horizon_or_timeframe" in item.message for item in result.findings)
     assert all(item.severity != "high" for item in result.findings)
+
+
+def test_mutual_specification_game_formalization_checks_architecture_obligations() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "/goal Mutual Specification Game for traders with model zoo routing, verifiers, tools, human review, and proof-carrying response.",
+    )
+    for stage in ("ingest", "hypothesize_spec", "retrieve_evidence"):
+        add_route(ledger, route_for_stage(stage, ledger))
+
+    record = formalize_ledger(ledger)
+
+    assert record.task_name == "mutual_specification_game"
+    assert record.domain == "mutual_spec"
+    assert record.is_valid == 1
+    assert record.missing_obligations == []
+    assert record.metrics["coverage"] == 1.0
+    assert "players" in record.answer["obligations"]
+    assert "claim_graph" in record.answer["obligations"]
 
 
 def test_verifier_blocks_ready_gate_when_formal_obligations_are_missing() -> None:

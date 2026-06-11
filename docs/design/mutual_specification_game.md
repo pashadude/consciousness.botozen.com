@@ -44,6 +44,26 @@ The shared state should track these fields explicitly:
 | `verification_conditions` | What must be true before finalization or decision framing. |
 | `decision_gate` | Whether the task needs more information, is analysis-ready, alert-ready, or decision-frame-ready. |
 
+## Implemented Game State
+
+The MVP now materializes the game-theory layer as first-class ledger state,
+not only as prose in the prompt.
+
+| Ledger field | Principle implemented | Runtime meaning |
+| --- | --- | --- |
+| `game_players` | Games of many persons | User, main agent, router, verifier, tool layer, and human reviewer are represented as separate players with objectives and action spaces. |
+| `game_states` | Staged composition of games | Elicitation, dialogue/commitment, retrieval, execution graph, and verification each expose status and blocking conditions. |
+| `latent_type_beliefs` | Bayesian games / Harsanyi types | The system keeps a normalized belief distribution over possible hidden task types inferred from the query signal. |
+| `commitments` | Signaling and commitment game | Goal, audience, format, constraints, and verification obligations are explicit commitments instead of implicit prompt interpretation. |
+| `claim_graph` | Proof-carrying response | Claims are typed as fact, assumption, inference, constraint, or decision gate and carry support IDs plus verifier state. |
+| `user_endorsement` | Anti-revealed-preference guard | Resolved, pending, and rejected fields are tracked separately from mere user engagement. |
+| `spec_convergence` | Convergence objective | Material fields, evidence, formalization, endorsement, and verification produce a compact convergence state. |
+
+This is not a formal equilibrium solver and not a Lean/Coq proof assistant.
+It is the executable MVP version of the theory: the agent exposes the current
+state of the specification game, blocks unsupported claims, and routes deeper
+work when the convergence state is not strong enough.
+
 ## Formalization Task Contract
 
 The formalization layer borrows the useful shape from Axolver without importing

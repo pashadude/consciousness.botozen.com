@@ -56,6 +56,10 @@ def test_console_api_accepts_speech_text_and_audio(tmp_path, monkeypatch) -> Non
     assert "Speech transcript:" in payload["ledger"]["user_request"]
     assert payload["route_decision"]["mode"] in {"sync", "async"}
     assert payload["frontier"]
+    assert payload["ledger"]["game_states"]
+    assert payload["ledger"]["latent_type_beliefs"]
+    assert payload["ledger"]["claim_graph"]
+    assert payload["ledger"]["spec_convergence"]["overall"] > 0
 
 
 def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:

@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-from app.spec_state import FormalizationRecord, SpecLedger, looks_like_trader_query
+from app.spec_state import (
+    FormalizationRecord,
+    SpecLedger,
+    looks_like_trader_query,
+    update_mutual_spec_game_state,
+)
 
 MAX_FORMALIZATION_RECORDS = 20
 
@@ -257,9 +262,128 @@ class TraderDecisionFrameTask(FormalizationTask):
         return 200 + min(len(instruments), 9) * 10 + min(len(actions), 9)
 
 
+class MutualSpecificationGameTask(FormalizationTask):
+    name = "mutual_specification_game"
+    domain = "mutual_spec"
+
+    obligations: ClassVar[dict[str, str]] = {
+        "players": "Represent user, main agent, router, verifier, tools, and human reviewer as interacting players.",
+        "staged_games": "Represent elicitation, dialogue/commitment, retrieval, execution graph, and verification as explicit games.",
+        "latent_type_beliefs": "Maintain Harsanyi-style beliefs over hidden task types theta from query signal q.",
+        "commitments": "Track accepted/proposed commitments rather than treating fluent output as agreement.",
+        "claim_graph": "Transform response content into claims with support, dependencies, and verifier state.",
+        "convergence_metric": "Score convergence between latent intent, expressed query, and executable specification.",
+        "model_zoo_routing": "Route across models, tools, verifiers, async jobs, and human review by risk and spec gain.",
+        "trader_gate": "Keep trader decisions blocked until evidence, risk, and proof obligations are satisfied.",
+    }
+
+    def generate(self, ledger: SpecLedger) -> FormalizationExample:
+        problem = {
+            "expressed_query": ledger.expressed_query or ledger.user_request,
+            "players": [item.player_id for item in ledger.game_players],
+            "game_states": [item.stage_id for item in ledger.game_states],
+            "beliefs": [item.type_id for item in ledger.latent_type_beliefs],
+            "claim_count": len(ledger.claim_graph),
+            "decision_gate": ledger.decision_gate,
+        }
+        question = "Which mechanics must exist for the Mutual Specification Game to be executable?"
+        answer = {
+            "obligations": self.obligations,
+            "non_goals": [
+                "do not reduce user intent to a scalar reward",
+                "do not clear trader execution gates from model fluency alone",
+                "do not treat Search Console/user approval as task welfare",
+            ],
+        }
+        return FormalizationExample(problem=problem, question=question, answer=answer)
+
+    def hypothesis(self, ledger: SpecLedger) -> dict[str, Any]:
+        return {
+            "players": [item.model_dump(mode="json") for item in ledger.game_players],
+            "game_states": [item.model_dump(mode="json") for item in ledger.game_states],
+            "latent_type_beliefs": [
+                item.model_dump(mode="json") for item in ledger.latent_type_beliefs
+            ],
+            "commitments": [item.model_dump(mode="json") for item in ledger.commitments],
+            "claim_graph": [item.model_dump(mode="json") for item in ledger.claim_graph],
+            "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
+            "route_history": [item.model_dump(mode="json") for item in ledger.route_history],
+            "async_jobs": [item.model_dump(mode="json") for item in ledger.async_jobs],
+            "verification_conditions": ledger.verification_conditions,
+            "decision_gate": ledger.decision_gate,
+            "success_criteria": ledger.success_criteria,
+        }
+
+    def evaluate(
+        self,
+        problem: Mapping[str, Any],
+        question: str | None,
+        answer: Mapping[str, Any],
+        hypothesis: Mapping[str, Any],
+        metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not problem.get("expressed_query"):
+            return {"is_valid": -1, "missing_obligations": ["expressed_query"]}
+        player_ids = {item.get("player_id") for item in hypothesis.get("players", [])}
+        stage_ids = {item.get("stage_id") for item in hypothesis.get("game_states", [])}
+        belief_ids = {item.get("type_id") for item in hypothesis.get("latent_type_beliefs", [])}
+        claim_graph = hypothesis.get("claim_graph", [])
+        route_history = hypothesis.get("route_history", [])
+        verification_conditions = stringify(hypothesis.get("verification_conditions", []))
+        success_criteria = stringify(hypothesis.get("success_criteria", []))
+        checks = {
+            "players": {
+                "user",
+                "main_agent",
+                "router",
+                "verifier",
+                "tool_layer",
+                "human_reviewer",
+            }.issubset(player_ids),
+            "staged_games": {
+                "elicitation",
+                "dialogue_commitment",
+                "retrieval",
+                "execution_graph",
+                "verification",
+            }.issubset(stage_ids),
+            "latent_type_beliefs": bool(belief_ids),
+            "commitments": bool(hypothesis.get("commitments")),
+            "claim_graph": bool(claim_graph),
+            "convergence_metric": bool(hypothesis.get("spec_convergence", {}).get("overall") is not None),
+            "model_zoo_routing": bool(route_history),
+            "trader_gate": "trader" in success_criteria or "trader" in verification_conditions,
+        }
+        missing = [name for name, passed in checks.items() if not passed]
+        required_count = len(checks)
+        satisfied_count = required_count - len(missing)
+        metrics.update(
+            {
+                "required_count": required_count,
+                "satisfied_count": satisfied_count,
+                "coverage": satisfied_count / required_count,
+                "missing_obligations": missing,
+            }
+        )
+        return {
+            **metrics,
+            "is_valid": 1 if not missing else 0,
+            "missing_obligations": missing,
+        }
+
+    def encode_class_id(
+        self,
+        problem: Mapping[str, Any],
+        question: str | None,
+        answer: Mapping[str, Any],
+    ) -> int:
+        return 300 + len(problem.get("players") or [])
+
+
 FORMALIZATION_REGISTRY: dict[str, FormalizationTask] = {
     GeneralSpecCompletionTask.name: GeneralSpecCompletionTask(),
     TraderDecisionFrameTask.name: TraderDecisionFrameTask(),
+    MutualSpecificationGameTask.name: MutualSpecificationGameTask(),
 }
 
 
@@ -289,14 +413,22 @@ def formalize_ledger(ledger: SpecLedger) -> FormalizationRecord:
     )
     ledger.formalization_records.append(record)
     ledger.formalization_records = ledger.formalization_records[-MAX_FORMALIZATION_RECORDS:]
+    update_mutual_spec_game_state(ledger)
     return record
 
 
 def select_formalization_task(ledger: SpecLedger) -> FormalizationTask:
     text = ledger.expressed_query or ledger.user_request
+    if is_mutual_specification_game_request(text):
+        return FORMALIZATION_REGISTRY[MutualSpecificationGameTask.name]
     if looks_like_trader_query(text):
         return FORMALIZATION_REGISTRY[TraderDecisionFrameTask.name]
     return FORMALIZATION_REGISTRY[GeneralSpecCompletionTask.name]
+
+
+def is_mutual_specification_game_request(text: str) -> bool:
+    lower = text.lower()
+    return "mutual specification" in lower or "specification game" in lower
 
 
 def extract_instruments(text: str) -> list[str]:

@@ -166,3 +166,23 @@ def test_physical_commodity_offer_builds_trader_decision_frame() -> None:
     assert any("Umm Qasr" in item.query for item in ledger.search_plan)
     assert any("Price benchmark" in item.purpose for item in ledger.search_plan)
     assert any(source.name == "model_hypothesis" for source in ledger.evidence_sources)
+
+
+def test_mutual_spec_game_state_is_materialized_from_query() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "/goal Mutual Specification Game for traders: reconstruct latent intent and verify before execution.",
+    )
+
+    player_ids = {item.player_id for item in ledger.game_players}
+    stage_ids = {item.stage_id for item in ledger.game_states}
+    belief_ids = {item.type_id for item in ledger.latent_type_beliefs}
+
+    assert {"user", "main_agent", "router", "verifier", "tool_layer", "human_reviewer"}.issubset(player_ids)
+    assert {"elicitation", "dialogue_commitment", "retrieval", "execution_graph", "verification"}.issubset(stage_ids)
+    assert "architecture_specification_game" in belief_ids
+    assert ledger.commitments
+    assert ledger.claim_graph
+    assert ledger.user_endorsement.endorsed_fields
+    assert ledger.spec_convergence.overall > 0

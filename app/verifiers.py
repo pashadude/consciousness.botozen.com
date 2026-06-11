@@ -48,6 +48,10 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
     evidence_lines = format_evidence_lines(ledger.evidence)
     latent_lines = format_optional_lines(ledger.latent_intent_hypotheses, empty="- None captured.")
     evidence_contract_lines = format_optional_lines(ledger.evidence_contract, empty="- None captured.")
+    game_state_lines = format_game_state_lines(ledger)
+    belief_lines = format_latent_belief_lines(ledger)
+    commitment_lines = format_commitment_lines(ledger)
+    claim_graph_lines = format_claim_graph_lines(ledger)
     verification_condition_lines = format_optional_lines(
         ledger.verification_conditions,
         empty="- Standard verifier conditions only.",
@@ -84,6 +88,18 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
             "Evidence Used",
             evidence_lines,
             "",
+            "Stage Games",
+            game_state_lines,
+            "",
+            "Latent Type Beliefs",
+            belief_lines,
+            "",
+            "Commitments",
+            commitment_lines,
+            "",
+            "Claim Graph",
+            claim_graph_lines,
+            "",
             "Formalization",
             formalization_lines,
             "",
@@ -96,6 +112,57 @@ def build_draft_from_ledger(ledger: SpecLedger) -> str:
             "Verification Conditions",
             verification_condition_lines,
         ]
+    )
+
+
+def format_game_state_lines(ledger: SpecLedger) -> str:
+    if not ledger.game_states:
+        return "- No staged game state generated."
+    lines = [
+        (
+            f"- {item.stage_id}: {item.status} | {item.game_type} | "
+            f"blocks: {', '.join(item.blocking_conditions) or 'none'}"
+        )
+        for item in ledger.game_states
+    ]
+    convergence = ledger.spec_convergence
+    lines.append(
+        "- convergence: "
+        f"{convergence.overall:.2f} ({convergence.status}; "
+        f"material={convergence.material_resolution:.2f}, "
+        f"evidence={convergence.evidence_resolution:.2f}, "
+        f"formal={convergence.formalization_resolution:.2f}, "
+        f"endorsement={convergence.endorsement_resolution:.2f}, "
+        f"verification={convergence.verification_resolution:.2f})"
+    )
+    return "\n".join(lines)
+
+
+def format_latent_belief_lines(ledger: SpecLedger) -> str:
+    if not ledger.latent_type_beliefs:
+        return "- No latent type beliefs generated."
+    return "\n".join(
+        f"- {item.type_id}: p={item.probability:.2f}; next={item.next_best_action}; signals={', '.join(item.evidence_signals)}"
+        for item in ledger.latent_type_beliefs[:6]
+    )
+
+
+def format_commitment_lines(ledger: SpecLedger) -> str:
+    if not ledger.commitments:
+        return "- No commitments recorded."
+    return "\n".join(
+        f"- [{item.commitment_id}] {item.field}: {item.value} ({item.status}, {item.player_id})"
+        for item in ledger.commitments[:12]
+    )
+
+
+def format_claim_graph_lines(ledger: SpecLedger) -> str:
+    if not ledger.claim_graph:
+        return "- No claim graph generated."
+    return "\n".join(
+        f"- [{item.claim_id}] {item.claim_type}/{item.verifier_state}: {item.text}"
+        + (f" supports={', '.join(item.support_ids)}" if item.support_ids else "")
+        for item in ledger.claim_graph[:16]
     )
 
 
@@ -197,6 +264,24 @@ def verify_draft(ledger: SpecLedger, draft: str) -> VerificationResult:
                     remediation="Keep the decision gate blocked or resolve the missing formal obligations.",
                 )
             )
+    unsupported_claims = [
+        item
+        for item in ledger.claim_graph
+        if item.verifier_state in {"needs_evidence", "unverified"}
+        and item.claim_type in {"fact", "inference"}
+    ]
+    if unsupported_claims and ledger.decision_gate != "needs_more_info":
+        findings.append(
+            VerificationFinding(
+                category="unsupported_claim",
+                severity="high",
+                message=(
+                    "Claim graph has unsupported factual/inference node(s): "
+                    + ", ".join(item.claim_id for item in unsupported_claims[:5])
+                ),
+                remediation="Attach evidence, downgrade to assumption, or keep the gate blocked.",
+            )
+        )
     findings.extend(detect_uncited_external_claims(draft, ledger.evidence))
     required_stages = ["ingest", "hypothesize_spec", "retrieve_evidence", "draft_output", "verify"]
     missing_stages = [stage for stage in required_stages if stage not in ledger.trajectory]

@@ -1,3 +1,5 @@
+import json
+
 from app.conversation_log import persist_console_talk
 from app.spec_state import SpecLedger, update_ledger_from_user_text
 from app.trader_rag import TraderRagResult
@@ -37,6 +39,10 @@ def test_persist_console_talk_writes_local_trace(tmp_path) -> None:
     assert uri
     files = list(tmp_path.glob("*.json"))
     assert len(files) == 1
-    payload = files[0].read_text()
-    assert "mutual_spec_user_talk" in payload
-    assert "spanner_rag" in payload
+    payload = json.loads(files[0].read_text())
+    assert payload["kind"] == "mutual_spec_user_talk"
+    assert payload["source_layer"]["provider"] == "spanner_rag"
+    assert payload["game_states"]
+    assert payload["latent_type_beliefs"]
+    assert payload["claim_graph"]
+    assert payload["spec_convergence"]["overall"] > 0

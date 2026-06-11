@@ -35,6 +35,7 @@ from app.spec_state import (
     add_route,
     record_stage,
     update_ledger_from_user_text,
+    update_mutual_spec_game_state,
 )
 from app.telemetry.domination import (
     RouteCandidate,
@@ -182,6 +183,7 @@ def build_console_result(
     add_route(ledger, route_for_stage("verify", ledger))
     verification = verify_draft(ledger, draft)
     ledger.verification_findings = verification.findings
+    update_mutual_spec_game_state(ledger)
     route_decision = route_async_decision(
         ledger,
         mcp_configured=configured_mcp(os.environ),
@@ -198,6 +200,7 @@ def build_console_result(
             if verification.passed and ledger.decision_gate != "needs_more_info"
             else "clarifying"
         )
+    update_mutual_spec_game_state(ledger)
     candidates = sample_route_candidates(os.environ)
     frontier_keys = {candidate.key for candidate in nondominated_candidates(candidates)}
     return ConsoleResult(
@@ -471,13 +474,56 @@ def render_game_panel(result: ConsoleResult) -> str:
 """
         for title, game, description, state in stages
     )
+    convergence = ledger.spec_convergence
+    actual_stage_rows = "\n".join(
+        f"""
+<li class="{escape(item.status)}">
+  <strong>{escape(item.stage_id)}</strong>
+  <span>{escape(item.game_type)}</span>
+  <p>{escape(item.objective)} Blocks: {escape(', '.join(item.blocking_conditions) or 'none')}</p>
+</li>
+"""
+        for item in ledger.game_states
+    ) or "<li><span>No executable game state generated.</span></li>"
+    belief_rows = "\n".join(
+        f"""
+<li>
+  <strong>{escape(item.type_id)}</strong>
+  <span>p={item.probability:.2f} | next={escape(item.next_best_action)}</span>
+  <p>{escape(item.description)} Signals: {escape(', '.join(item.evidence_signals))}</p>
+</li>
+"""
+        for item in ledger.latent_type_beliefs[:5]
+    ) or "<li><span>No latent type beliefs.</span></li>"
+    claim_rows = "\n".join(
+        f"""
+<li class="{escape(item.verifier_state)}">
+  <strong>{escape(item.claim_type)}</strong>
+  <span>{escape(item.verifier_state)} | {escape(item.claim_id)}</span>
+  <p>{escape(item.text)}</p>
+</li>
+"""
+        for item in ledger.claim_graph[:8]
+    ) or "<li><span>No claim graph.</span></li>"
     return f"""
 <section class="panel game-panel">
   <div class="panel-title">
     <h2>Mutual Specification Game</h2>
-    <span class="muted">object = shared spec, not prompt answer</span>
+    <span class="muted">convergence {convergence.overall:.2f} / {escape(convergence.status)}</span>
   </div>
   <ol class="game-list">{rows}</ol>
+  <details open>
+    <summary>Executable Stage State</summary>
+    <ul class="source-list">{actual_stage_rows}</ul>
+  </details>
+  <details>
+    <summary>Latent Type Beliefs</summary>
+    <ul class="source-list">{belief_rows}</ul>
+  </details>
+  <details>
+    <summary>Claim Graph</summary>
+    <ul class="source-list">{claim_rows}</ul>
+  </details>
 </section>
 """
 
