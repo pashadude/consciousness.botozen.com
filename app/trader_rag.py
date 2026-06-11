@@ -400,13 +400,14 @@ def run_spanner_provider(
     per_query_limit = max(1, min(config.max_results, 10))
     for query in queries[: config.max_queries]:
         try:
-            evidence.extend(
-                query_spanner_chunks(
-                    query,
-                    config=config,
-                    limit=per_query_limit,
-                )
+            query_evidence = query_spanner_chunks(
+                query,
+                config=config,
+                limit=per_query_limit,
             )
+            evidence.extend(query_evidence)
+            if query_evidence:
+                break
         except Exception as exc:
             warnings.append(f"Spanner RAG failed for `{query}`: {exc}")
     deduped = dedupe_evidence(evidence)[: config.max_results]
@@ -429,12 +430,6 @@ def query_spanner_chunks(
     limit: int,
 ) -> list[SearchEvidence]:
     table = safe_spanner_identifier(config.spanner_chunks_table or "RagChunks")
-    sql = f"""
-        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
-        FROM {table}
-        WHERE SEARCH(ChunkTokens, @query)
-        LIMIT @limit
-    """
     from google.cloud import spanner
 
     database = (
@@ -442,21 +437,117 @@ def query_spanner_chunks(
         .instance(config.spanner_instance_id)
         .database(config.spanner_database_id)
     )
-    with database.snapshot() as snapshot:
-        rows = list(
-            snapshot.execute_sql(
-                sql,
-                params={"query": query, "limit": limit},
-                param_types={
-                    "query": spanner.param_types.STRING,
-                    "limit": spanner.param_types.INT64,
-                },
-            )
+    try:
+        rows = execute_spanner_search(
+            database=database,
+            table=table,
+            query=query,
+            limit=limit,
+            param_types=spanner.param_types,
         )
+    except Exception as search_exc:
+        try:
+            rows = execute_spanner_scan_fallback(
+                database=database,
+                table=table,
+                query=query,
+                limit=limit,
+                param_types=spanner.param_types,
+            )
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                f"full-text search failed ({search_exc}); fallback scan failed ({fallback_exc})"
+            ) from fallback_exc
     evidence: list[SearchEvidence] = []
     for row in rows:
         evidence.append(spanner_row_to_evidence(row, query=query, config=config))
     return evidence
+
+
+def execute_spanner_search(
+    *,
+    database: Any,
+    table: str,
+    query: str,
+    limit: int,
+    param_types: Any,
+) -> list[Any]:
+    sql = f"""
+        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
+        FROM {table}
+        WHERE SEARCH(ChunkTokens, @query)
+        LIMIT @limit
+    """
+    with database.snapshot() as snapshot:
+        return list(
+            snapshot.execute_sql(
+                sql,
+                params={"query": query, "limit": limit},
+                param_types={
+                    "query": param_types.STRING,
+                    "limit": param_types.INT64,
+                },
+            )
+        )
+
+
+def execute_spanner_scan_fallback(
+    *,
+    database: Any,
+    table: str,
+    query: str,
+    limit: int,
+    param_types: Any,
+) -> list[Any]:
+    terms = spanner_scan_terms(query)
+    if not terms:
+        return []
+    where = " AND ".join(f"LOWER(TextForEmbedding) LIKE @term{index}" for index, _ in enumerate(terms))
+    sql = f"""
+        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
+        FROM {table}
+        WHERE {where}
+        LIMIT @limit
+    """
+    params = {"limit": limit} | {
+        f"term{index}": f"%{term.lower()}%" for index, term in enumerate(terms)
+    }
+    param_types_map = {"limit": param_types.INT64} | {
+        f"term{index}": param_types.STRING for index, _ in enumerate(terms)
+    }
+    with database.snapshot() as snapshot:
+        return list(
+            snapshot.execute_sql(
+                sql,
+                params=params,
+                param_types=param_types_map,
+            )
+        )
+
+
+def spanner_scan_terms(query: str) -> list[str]:
+    phrases = re.findall(r'"([^"]{3,80})"', query)
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", query)
+    stop = {
+        "and",
+        "the",
+        "for",
+        "with",
+        "market",
+        "price",
+        "risk",
+        "terms",
+        "game",
+        "task",
+    }
+    values: list[str] = []
+    for value in [*phrases, *tokens]:
+        normalized = " ".join(value.lower().split()).strip(" .,:;")
+        if not normalized or normalized in stop:
+            continue
+        if normalized not in values:
+            values.append(normalized)
+    return values[:4]
 
 
 def spanner_row_to_evidence(

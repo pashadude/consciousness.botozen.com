@@ -554,6 +554,11 @@ def looks_like_trader_query(text: str) -> bool:
         "inventory",
         "hedge",
         "liquidity",
+        "trader",
+        "trade",
+        "mutual specification",
+        "specification game",
+        "latent intent",
     )
     return any(token in lower for token in trader_tokens)
 
@@ -597,6 +602,13 @@ def plan_trader_evidence_search(ledger: SpecLedger, text: str) -> SpecLedger:
 
 
 def trader_required_evidence(lower_text: str) -> list[str]:
+    if "mutual specification" in lower_text or "specification game" in lower_text:
+        return [
+            "Prior Mutual Specification Game mechanics and user-talk ledgers.",
+            "Game-theory framing for hidden types, signaling, commitment, and verification.",
+            "Human-AI collaboration constraints: compatibility, bounded memory, and true user welfare.",
+            "Proof-carrying response structure: assumptions, claims, dependencies, tests, and verifier states.",
+        ]
     base = [
         "Price benchmark and market context near the offer date.",
         "Product specification, grade, quantity tolerance, and inspection standard.",
@@ -611,6 +623,13 @@ def trader_required_evidence(lower_text: str) -> list[str]:
 
 
 def trader_search_queries(lower_text: str) -> list[str]:
+    if "mutual specification" in lower_text or "specification game" in lower_text:
+        return [
+            '"Mutual Specification Game" trader latent task',
+            '"specification ledger" "proof-carrying response"',
+            '"Bayesian game" "signaling game" "human-AI"',
+            '"trader" "latent intent" "executable specification"',
+        ]
     if "sulfur" in lower_text or "sulphur" in lower_text:
         return [
             '"sulfur" "Umm Qasr" FOB price',
@@ -646,6 +665,11 @@ def extract_trader_search_terms(lower_text: str) -> list[str]:
         "freight",
         "counterparty",
         "sanctions",
+        "trader",
+        "trade",
+        "mutual specification",
+        "specification game",
+        "latent intent",
     )
     return [term for term in candidates if term in lower_text]
 

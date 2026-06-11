@@ -6,6 +6,7 @@ from app.trader_rag import (
     apply_rag_to_ledger,
     load_trader_source_config,
     run_trader_rag,
+    spanner_scan_terms,
 )
 
 SULFUR_OFFER = (
@@ -88,6 +89,26 @@ def test_google_agent_search_provider_records_workflow_handoff() -> None:
     assert result.provider == "google_agent_search"
     assert result.status == "configured"
     assert any(source.source_type == "google_agent_search" for source in ledger.evidence_sources)
+
+
+def test_mutual_spec_goal_builds_trader_source_plan() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "/goal Mutual Specification Game for traders should minimize latent intent difference.",
+    )
+
+    assert ledger.search_plan
+    assert any("Mutual Specification Game" in item.query for item in ledger.search_plan)
+    assert any("user-talk ledgers" in item for item in ledger.verification_conditions)
+
+
+def test_spanner_scan_terms_preserve_phrases_and_drop_generic_terms() -> None:
+    terms = spanner_scan_terms('"Mutual Specification Game" trader latent task')
+
+    assert "mutual specification game" in terms
+    assert "trader" in terms
+    assert "task" not in terms
 
 
 def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:
