@@ -30,6 +30,7 @@ from app.router import (
 )
 from app.spec_state import (
     ArtifactRef,
+    HumanReviewState,
     SpecLedger,
     add_evidence_from_artifacts,
     add_route,
@@ -437,6 +438,7 @@ def render_decision_summary_panel(result: ConsoleResult) -> str:
     review = ledger.human_review
     source_status = result.rag_result.status
     summary_class = gate_status_class(ledger.decision_gate)
+    review_notice = render_human_review_notice(review)
     return f"""
 <section class="panel decision-panel {summary_class}" id="decisionPanel">
   <div class="panel-title">
@@ -446,13 +448,14 @@ def render_decision_summary_panel(result: ConsoleResult) -> str:
     </div>
     <div class="button-row">
       <button type="button" id="copyAnswer">Copy Answer</button>
-      <button type="button" id="markReviewed">Mark Reviewed</button>
+      <button type="button" id="markReviewed">Acknowledge Gate</button>
     </div>
   </div>
   <div class="decision-callout">
     <span class="decision-label">{escape(ledger.decision_gate)}</span>
     <p>{escape(primary)}</p>
   </div>
+  {review_notice}
   {render_list(supporting)}
   <div class="status-strip decision-strip">
     <span class="pill {source_status_class(source_status)}">sources {escape(source_status)} / {evidence_count}</span>
@@ -460,6 +463,26 @@ def render_decision_summary_panel(result: ConsoleResult) -> str:
     <span class="pill {'verified' if result.verification_passed else 'blocked'}">verification {'pass' if result.verification_passed else 'blocked'}</span>
   </div>
 </section>
+"""
+
+
+def render_human_review_notice(review: HumanReviewState) -> str:
+    if not review.required:
+        return """
+  <div class="review-notice neutral">
+    <strong>No human-review gate.</strong>
+    <p>This task is not currently blocked by high-stakes review policy.</p>
+  </div>
+"""
+    reason = review.reasons[0] if review.reasons else "The task is high stakes or has unresolved proof obligations."
+    action = review.required_actions[0] if review.required_actions else "Resolve the open evidence and verification packet."
+    return f"""
+  <div class="review-notice {review_status_class(review.status)}">
+    <strong>Why human review is {escape(review.status)}:</strong>
+    <p>{escape(reason)}</p>
+    <p><span class="label-inline">Next</span> {escape(action)}</p>
+    <p><span class="label-inline">Meaning</span> The agent may provide a provisional decision frame, but it must not present this as execution-ready or take/broker action.</p>
+  </div>
 """
 
 
@@ -846,6 +869,7 @@ def render_artifacts_panel(result: ConsoleResult) -> str:
 
 def render_human_review_panel(result: ConsoleResult) -> str:
     review = result.ledger.human_review
+    notice = render_human_review_notice(review)
     reason_rows = render_list(review.reasons)
     action_rows = render_list(review.required_actions)
     claim_rows = render_list(review.blocking_claim_ids)
@@ -854,9 +878,13 @@ def render_human_review_panel(result: ConsoleResult) -> str:
     return f"""
 <section class="panel review-panel">
   <div class="panel-title">
-    <h2>Human Review Queue</h2>
+    <div>
+      <h2>Human Review Gate</h2>
+      <p class="subtle">Queued means policy review required, not a frozen backend job.</p>
+    </div>
     <span class="pill {review_status_class(review.status)}">{escape(review.status)}</span>
   </div>
+  {notice}
   <dl class="kv">
     <dt>required</dt><dd>{escape(str(review.required).lower())}</dd>
     <dt>risk</dt><dd>{escape(review.risk_level)}</dd>
@@ -1257,6 +1285,27 @@ form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; 
   font-weight: 650;
 }
 .decision-strip { margin-top: 12px; }
+.review-notice {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #fbfcfb;
+}
+.review-notice.review { border-color: #9acbc6; background: #eefaf8; }
+.review-notice.blocked { border-color: #e2a29d; background: #fff3f2; }
+.review-notice.clarify { border-color: #e3cc95; background: #fff8e7; }
+.review-notice.verified { border-color: #9ccdad; background: #eefaf3; }
+.review-notice.neutral { color: var(--gray); }
+.review-notice p { font-size: 14px; line-height: 1.45; }
+.label-inline {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  margin-right: 6px;
+}
 .spec-grid, .detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .spec-grid p, .detail-grid p, li { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 .detail-grid { margin-top: 14px; }
@@ -1347,7 +1396,7 @@ copyAnswerButton?.addEventListener("click", async () => {
 });
 
 markReviewedButton?.addEventListener("click", () => {
-  markReviewedButton.textContent = "Reviewed";
+  markReviewedButton.textContent = "Gate Acknowledged";
   markReviewedButton.disabled = true;
   decisionPanel?.querySelectorAll(".pill.review, .pill.clarify").forEach(item => {
     item.classList.remove("review", "clarify");

@@ -96,7 +96,9 @@ def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) ->
     assert response.status_code == 200
     assert "Mutual Specification Game" in response.text
     assert "Trader Source Layer" in response.text
-    assert "Human Review Queue" in response.text
+    assert "Human Review Gate" in response.text
+    assert "Queued means policy review required" in response.text
+    assert "Why human review is queued" in response.text
     assert "Skill Compatibility" in response.text
     assert "Proof Obligations" in response.text
     assert "Equilibrium Diagnostics" in response.text
