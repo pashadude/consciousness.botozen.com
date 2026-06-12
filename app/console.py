@@ -1410,6 +1410,8 @@ def render_status_legend() -> str:
     <span><i class="dot yellow"></i>Optional or needs input</span>
     <span><i class="dot red"></i>Missing or blocked</span>
     <span><i class="dot blue"></i>Running now</span>
+    <span><i class="dot async"></i>Async/background job</span>
+    <span><i class="dot review"></i>Human review gate</span>
   </div>
 """
 
@@ -1570,6 +1572,8 @@ form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; 
 .dot.red { background: var(--red); }
 .dot.blue { background: var(--blue); }
 .dot.yellow { background: var(--amber); }
+.dot.async { background: var(--purple); }
+.dot.review { background: var(--teal); }
 .route-steps { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .route-steps li {
   display: grid;
