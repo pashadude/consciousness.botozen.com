@@ -42,6 +42,24 @@ EXCLUDED_SPANNER_TAGS = {
     "specification_ledger",
     "trader_agent",
 }
+RELEVANCE_STOP_TERMS = {
+    "benchmark",
+    "cargo",
+    "context",
+    "counterparty",
+    "documents",
+    "export",
+    "freight",
+    "inspection",
+    "logistics",
+    "market",
+    "offer",
+    "payment",
+    "price",
+    "risk",
+    "shipping",
+    "terms",
+}
 
 
 @dataclass(frozen=True)
@@ -537,10 +555,16 @@ def run_mcp_provider(
                 f"MCP search failed for `{query}`: {exception_summary(exc)}"
             )
             continue
-        evidence.extend(
+        query_evidence = [
             normalize_mcp_record(record, query=query, index=index)
             for index, record in enumerate(records, start=1)
-        )
+        ]
+        relevant_evidence = filter_evidence_by_query(query_evidence, query)
+        if query_evidence and not relevant_evidence:
+            warnings.append(
+                f"MCP returned {len(query_evidence)} result(s) for `{query}`, but none matched material query terms."
+            )
+        evidence.extend(relevant_evidence)
         if evidence:
             break
     deduped = dedupe_evidence(evidence)[: config.max_results]
@@ -552,6 +576,38 @@ def run_mcp_provider(
         evidence=deduped,
         warnings=warnings or ([] if deduped else ["MCP returned no article evidence."]),
     )
+
+
+def filter_evidence_by_query(
+    evidence: list[SearchEvidence],
+    query: str,
+) -> list[SearchEvidence]:
+    return [item for item in evidence if search_evidence_matches_query(item, query)]
+
+
+def search_evidence_matches_query(item: SearchEvidence, query: str) -> bool:
+    terms = evidence_relevance_terms(query)
+    if not terms:
+        return True
+    haystack = f"{item.title} {item.summary}".lower()
+    return any(term in haystack for term in terms)
+
+
+def evidence_relevance_terms(query: str) -> list[str]:
+    phrases = re.findall(r'"([^"]{3,80})"', query.lower())
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", query.lower())
+    terms: list[str] = []
+    for value in [*phrases, *tokens]:
+        normalized = " ".join(value.split()).strip(" .,:;")
+        if (
+            not normalized
+            or normalized in RELEVANCE_STOP_TERMS
+            or normalized in {"and", "the", "for", "with"}
+        ):
+            continue
+        if normalized not in terms:
+            terms.append(normalized)
+    return terms
 
 
 def run_async_mcp(coro: Any) -> Any:
@@ -1216,12 +1272,25 @@ def dedupe_evidence(items: list[SearchEvidence]) -> list[SearchEvidence]:
     seen: set[str] = set()
     result: list[SearchEvidence] = []
     for item in items:
-        key = item.url or item.title
-        if key in seen:
+        keys = {
+            normalize_evidence_dedupe_key(item.url),
+            normalize_evidence_dedupe_key(item.title),
+        }
+        keys.discard("")
+        if seen & keys:
             continue
-        seen.add(key)
+        seen.update(keys)
         result.append(item)
     return result
+
+
+def normalize_evidence_dedupe_key(value: str) -> str:
+    lowered = " ".join(str(value or "").lower().split())
+    lowered = lowered.removeprefix("https://www.")
+    lowered = lowered.removeprefix("http://www.")
+    lowered = lowered.removeprefix("https://")
+    lowered = lowered.removeprefix("http://")
+    return lowered.rstrip("/")
 
 
 def extract_search_terms(lower: str) -> list[str]:

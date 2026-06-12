@@ -6,8 +6,10 @@ from app.trader_rag import (
     SearchEvidence,
     TraderSourceConfig,
     apply_rag_to_ledger,
+    dedupe_evidence,
     default_opoint_mcp_command,
     exception_summary,
+    filter_evidence_by_query,
     load_trader_source_config,
     mcp_search_arguments,
     mcp_stdio_env,
@@ -238,6 +240,49 @@ def test_mcp_opoint_provider_retrieves_live_source_shape(monkeypatch) -> None:
     assert result.evidence[0].source == "Opoint Test Wire"
     assert any(item.source_type == "rag" for item in ledger.evidence)
     assert any("Iraq sulfur export fixture" == item.title for item in ledger.evidence)
+
+
+def test_external_evidence_filter_drops_irrelevant_opoint_articles() -> None:
+    query = '"sulfur" "Umm Qasr" FOB price'
+    irrelevant = SearchEvidence(
+        evidence_id="mcp:war",
+        title="US-Israel-Iran War News LIVE",
+        url="https://example.test/war",
+        summary="Missile strikes and evacuation routes in West Asia.",
+        query=query,
+        source="opoint_mcp",
+    )
+    relevant = SearchEvidence(
+        evidence_id="mcp:sulfur",
+        title="Iraq seizes +100K tons of illegally stocked sulfur in Basra raid",
+        url="https://example.test/sulfur",
+        summary="Security forces seized sulfur stockpiles in Basra.",
+        query=query,
+        source="opoint_mcp",
+    )
+
+    assert filter_evidence_by_query([irrelevant, relevant], query) == [relevant]
+
+
+def test_evidence_dedupe_collapses_mirror_urls_by_title() -> None:
+    first = SearchEvidence(
+        evidence_id="mcp:1",
+        title="Iraq seizes +100K tons of illegally stocked sulfur in Basra raid",
+        url="https://www.shafaq.com/en/Security/Iraq-seizes-100K-tons",
+        summary="First mirror.",
+        query="sulfur",
+        source="opoint_mcp",
+    )
+    second = SearchEvidence(
+        evidence_id="mcp:2",
+        title="Iraq seizes +100K tons of illegally stocked sulfur in Basra raid",
+        url="https://shafaq.com/en/Security/Iraq-seizes-100K-tons",
+        summary="Second mirror.",
+        query="sulfur",
+        source="opoint_mcp",
+    )
+
+    assert dedupe_evidence([first, second]) == [first]
 
 
 def test_mcp_opoint_provider_requires_key_for_vendored_server() -> None:
