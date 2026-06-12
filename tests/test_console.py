@@ -76,6 +76,27 @@ def test_console_api_accepts_speech_text_and_audio(tmp_path, monkeypatch) -> Non
         "defer",
     }
     assert payload["formal_proofs"]["backend"] == "lean"
+    assert payload["provisional_answer"]
+    assert payload["provisional_answer"][0].startswith("Immediate answer:")
+
+
+def test_console_generic_query_returns_answer_frame(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setenv("TRADER_RAG_PROVIDER", "disabled")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/spec",
+        data={"query": "Draft a launch checklist for the new dashboard"},
+    )
+
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["provisional_answer"][0].startswith("Immediate answer:")
+    assert any("Latent task:" in item for item in payload["provisional_answer"])
+    assert any("Source layer:" in item for item in payload["provisional_answer"])
+    assert payload["ledger"]["expressed_query"] == "Draft a launch checklist for the new dashboard"
 
 
 def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:

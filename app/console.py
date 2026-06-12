@@ -132,6 +132,7 @@ async def create_spec_json(
                 ),
             },
             "human_review": result.ledger.human_review.model_dump(mode="json"),
+            "provisional_answer": build_provisional_answer(result),
             "skill_compatibility": result.ledger.skill_compatibility.model_dump(mode="json"),
             "proof_obligations": [
                 item.model_dump(mode="json") for item in result.ledger.proof_obligations
@@ -1002,20 +1003,9 @@ def build_provisional_answer(result: ConsoleResult) -> list[str]:
                 "Source layer: no live cited market/search evidence was retrieved in this run, so FOB 550, port/loading, sanctions, and resale claims remain unverified."
             )
     elif ledger.latent_intent_hypotheses:
-        answer.extend(
-            [
-                "Immediate answer: convert the prompt into a verified decision frame before acting.",
-                "Latent task: " + ledger.latent_intent_hypotheses[0],
-                "Gate: keep decision ownership with the user and resolve missing evidence before execution.",
-            ]
-        )
+        answer.extend(build_generic_answer_lines(result))
     else:
-        answer.extend(
-            [
-                "Immediate answer: the prompt is still under-specified.",
-                "Latent task: clarify goal, audience, output format, and required evidence.",
-            ]
-        )
+        answer.extend(build_generic_answer_lines(result))
     if ledger.artifact_refs:
         answer.append(
             f"Artifacts attached: {len(ledger.artifact_refs)} file(s). They are included as evidence references, but claims from images/audio need inspection or transcription before finalizing."
@@ -1027,6 +1017,78 @@ def build_provisional_answer(result: ConsoleResult) -> list[str]:
             + "."
         )
     return answer
+
+
+def build_generic_answer_lines(result: ConsoleResult) -> list[str]:
+    ledger = result.ledger
+    source_status = result.rag_result.status
+    source_count = len(result.rag_result.evidence)
+    recommendation = ledger.equilibrium_diagnostics.recommended_action or "propose"
+    output_format = ledger.output_format or "response"
+    latent_task = (
+        ledger.latent_intent_hypotheses[0]
+        if ledger.latent_intent_hypotheses
+        else (
+            ledger.latent_type_beliefs[0].description
+            if ledger.latent_type_beliefs
+            else "Reconstruct the user's latent task from the submitted query."
+        )
+    )
+    if ledger.decision_gate == "needs_more_info":
+        primary = (
+            f"Immediate answer: I can answer this as a provisional {output_format}, "
+            f"but it is not execution-ready yet; the current best action is {recommendation}."
+        )
+    else:
+        primary = (
+            f"Immediate answer: use the current {output_format} as the working answer; "
+            f"the current best action is {recommendation}."
+        )
+    lines = [
+        primary,
+        "Latent task: " + latent_task,
+        (
+            "Current spec: "
+            f"goal={ledger.goal or 'unresolved'}, "
+            f"audience={ledger.audience or 'unresolved'}, "
+            f"format={ledger.output_format or 'unresolved'}."
+        ),
+        (
+            f"Source layer: {source_status} with {source_count} cited item(s); "
+            + (
+                "use retrieved evidence below before trusting material claims."
+                if source_count
+                else "no cited evidence was retrieved for this run, so factual claims remain provisional."
+            )
+        ),
+        (
+            f"Verification: {'passed' if result.verification_passed else 'blocked'}; "
+            f"decision gate={ledger.decision_gate}; "
+            f"human review={ledger.human_review.status}."
+        ),
+    ]
+    next_line = next_action_line(ledger, recommendation)
+    if next_line:
+        lines.append(next_line)
+    return lines
+
+
+def next_action_line(ledger: SpecLedger, recommendation: str) -> str:
+    if ledger.human_review.required and ledger.human_review.required_actions:
+        return "Next action: " + ledger.human_review.required_actions[0]
+    if recommendation == "ask" and ledger.ambiguities:
+        fields = ", ".join(item.field for item in ledger.ambiguities[:6])
+        return f"Next action: clarify these fields: {fields}."
+    open_search = [item for item in ledger.search_plan if item.required and item.status != "satisfied"]
+    if recommendation == "retrieve" and open_search:
+        return "Next action: retrieve evidence for: " + "; ".join(item.purpose for item in open_search[:3])
+    if recommendation == "review" and ledger.human_review.reasons:
+        return "Next action: review gate reason: " + ledger.human_review.reasons[0]
+    if recommendation == "finalize":
+        return "Next action: finalize the answer with the cited evidence and accepted assumptions."
+    if recommendation == "propose":
+        return "Next action: propose the working spec and ask the user to endorse or correct it."
+    return ""
 
 
 def render_list(items: list[str]) -> str:

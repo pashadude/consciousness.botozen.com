@@ -196,22 +196,22 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
         ),
         StatusItem(
             "Gemini API key fallback",
-            "blue" if api_key else "red",
-            "GEMINI_API_KEY or GOOGLE_API_KEY",
+            "blue" if api_key or (vertex_enabled and project and location) else "red",
+            "configured" if api_key else "not needed when Vertex AI auth is active",
         ),
         StatusItem(
             "Cheap model",
-            "blue" if has_google_auth and configured_value(env.get("MUTUAL_SPEC_CHEAP_MODEL")) else "red",
+            "blue" if has_google_auth else "red",
             env.get("MUTUAL_SPEC_CHEAP_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Strong model",
-            "blue" if has_google_auth and configured_value(env.get("MUTUAL_SPEC_STRONG_MODEL")) else "red",
+            "blue" if has_google_auth else "red",
             env.get("MUTUAL_SPEC_STRONG_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Verifier model",
-            "blue" if has_google_auth and configured_value(env.get("MUTUAL_SPEC_VERIFIER_MODEL")) else "red",
+            "blue" if has_google_auth else "red",
             env.get("MUTUAL_SPEC_VERIFIER_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
