@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import mimetypes
 import os
 import re
@@ -12,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.cli_dashboard import (
@@ -52,6 +53,8 @@ DEFAULT_UPLOAD_DIR = "app/.adk/console_uploads"
 QUERY_FORM = Form("")
 SPEECH_TEXT_FORM = Form("")
 FILES_FORM = File(None)
+JSON_BODY = Body(...)
+OPERATOR_REVIEW_TOKEN_HEADER = Header(default=None)
 
 
 @dataclass(frozen=True)
@@ -159,6 +162,38 @@ async def create_spec_json(
                     for item in result.rag_result.evidence
                 ],
             },
+        }
+    )
+
+
+@app.post("/api/human-review")
+async def human_review_json(
+    payload: dict = JSON_BODY,
+    x_operator_review_token: str | None = OPERATOR_REVIEW_TOKEN_HEADER,
+) -> JSONResponse:
+    expected_token = os.environ.get("OPERATOR_REVIEW_TOKEN", "").strip()
+    supplied_token = str(payload.get("operator_token") or x_operator_review_token or "").strip()
+    if expected_token and supplied_token != expected_token:
+        raise HTTPException(status_code=403, detail="operator review token required")
+
+    ledger_payload = payload.get("ledger")
+    if not isinstance(ledger_payload, dict):
+        raise HTTPException(status_code=400, detail="ledger payload is required")
+    action = str(payload.get("action") or "").strip().lower()
+    note = str(payload.get("note") or "").strip()
+    operator = str(payload.get("operator") or "console_operator").strip() or "console_operator"
+    ledger = SpecLedger.model_validate(ledger_payload)
+    message = apply_operator_review(ledger, action=action, note=note, operator=operator)
+    update_mutual_spec_game_state(ledger)
+    append_human_review_log(ledger, action=action, note=note, operator=operator, message=message)
+    return JSONResponse(
+        {
+            "ledger": ledger.model_dump(mode="json"),
+            "human_review": ledger.human_review.model_dump(mode="json"),
+            "decision_gate": ledger.decision_gate,
+            "decision_gate_label": readable_state(ledger.decision_gate),
+            "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
+            "operator_message": message,
         }
     )
 
@@ -346,6 +381,7 @@ def render_page(
             render_header(result),
             render_workspace(text, result, spend, env),
             "</main>",
+            render_ledger_payload(result),
             "<script>",
             JS,
             "</script>",
@@ -353,6 +389,14 @@ def render_page(
             "</html>",
         ]
     )
+
+
+def render_ledger_payload(result: ConsoleResult) -> str:
+    payload = json.dumps(result.ledger.model_dump(mode="json"), sort_keys=True).replace(
+        "</",
+        "<\\/",
+    )
+    return f'<script id="ledgerPayload" type="application/json">{payload}</script>'
 
 
 def render_header(result: ConsoleResult) -> str:
@@ -456,6 +500,7 @@ def render_operator_route_panel(result: ConsoleResult) -> str:
     <span class="pill {gate_status_class(result.ledger.decision_gate)}">{escape(readable_state(result.ledger.decision_gate))}</span>
   </div>
   <ol class="route-steps">{rows}</ol>
+  {render_model_handoff_plan(result)}
 </section>
 """
 
@@ -546,6 +591,130 @@ def build_operator_route_steps(result: ConsoleResult) -> list[tuple[int, str, st
     ]
 
 
+def render_model_handoff_plan(result: ConsoleResult) -> str:
+    rows = "\n".join(
+        f"""
+<tr>
+  <td>{escape(route.stage)}</td>
+  <td>{escape(route.model_class)}</td>
+  <td>{escape(route.selected_model)}</td>
+  <td>{escape(model_execution_mode(route.stage, result))}</td>
+</tr>
+"""
+        for route in result.ledger.route_history
+    )
+    if not rows:
+        rows = '<tr><td colspan="4">No model route records yet.</td></tr>'
+    return f"""
+  <details open>
+    <summary>Model Handoff Plan</summary>
+    <p class="subtle">This console records model selection per stage. Stages marked deterministic did not call a Gemini model in this request.</p>
+    <div class="table-wrap">
+      <table class="compact-table">
+        <thead><tr><th>stage</th><th>model class</th><th>selected model</th><th>actual execution</th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>
+  </details>
+"""
+
+
+def model_execution_mode(stage: str, result: ConsoleResult) -> str:
+    if stage == "retrieve_evidence" and result.rag_result.status == "retrieved":
+        return "tool/RAG retrieval executed"
+    if stage == "verify":
+        return "deterministic verifier, model route recorded"
+    if stage == "draft_output":
+        return "deterministic draft builder, model route recorded"
+    if stage in {"ingest", "hypothesize_spec"}:
+        return "deterministic ledger stage, model route recorded"
+    return "model route recorded"
+
+
+def apply_operator_review(
+    ledger: SpecLedger,
+    *,
+    action: str,
+    note: str,
+    operator: str,
+) -> str:
+    status_by_action = {
+        "start": "in_review",
+        "start_review": "in_review",
+        "approve": "approved",
+        "approved": "approved",
+        "request_changes": "changes_requested",
+        "changes_requested": "changes_requested",
+        "reject": "rejected",
+        "rejected": "rejected",
+    }
+    status = status_by_action.get(action)
+    if not status:
+        raise HTTPException(status_code=400, detail="unsupported human-review action")
+    if not ledger.human_review.required and status != "in_review":
+        status = "not_required"
+        message = "Human review is not required for this spec; the operator note was logged."
+    elif status == "approved" and has_open_hard_obligations(ledger):
+        status = "changes_requested"
+        message = "Operator approval cannot clear yet because source, proof, or verifier obligations remain open."
+    elif status == "approved":
+        message = "Operator approved the human-review gate."
+    elif status == "changes_requested":
+        message = "Operator requested changes or more evidence."
+    elif status == "rejected":
+        message = "Operator rejected the current decision frame."
+    else:
+        message = "Operator started human review."
+    signal = f"{operator}: {action}"
+    if note:
+        signal = f"{signal} - {note}"
+    ledger.human_review = ledger.human_review.model_copy(
+        update={
+            "status": status,
+            "last_reviewer_signal": signal,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    return message
+
+
+def has_open_hard_obligations(ledger: SpecLedger) -> bool:
+    return (
+        any(item.severity == "high" for item in ledger.verification_findings)
+        or any(
+            item.required and item.status not in {"satisfied", "waived"}
+            for item in ledger.proof_obligations
+            if item.source_type in {"evidence", "formalization", "artifact", "verifier_finding"}
+        )
+        or bool(ledger.ambiguities)
+    )
+
+
+def append_human_review_log(
+    ledger: SpecLedger,
+    *,
+    action: str,
+    note: str,
+    operator: str,
+    message: str,
+) -> None:
+    path = Path(os.environ.get("HUMAN_REVIEW_LOG_PATH", "/tmp/mutual_spec_human_reviews.jsonl"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": datetime.now(UTC).isoformat(),
+        "ledger_id": ledger.ledger_id,
+        "review_id": ledger.human_review.review_id,
+        "operator": operator,
+        "action": action,
+        "status": ledger.human_review.status,
+        "decision_gate": ledger.decision_gate,
+        "message": message,
+        "note": note,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def render_decision_summary_panel(result: ConsoleResult) -> str:
     ledger = result.ledger
     answer_lines = build_provisional_answer(result)
@@ -565,7 +734,6 @@ def render_decision_summary_panel(result: ConsoleResult) -> str:
     </div>
     <div class="button-row">
       <button type="button" id="copyAnswer">Copy Answer</button>
-      <button type="button" id="markReviewed">Acknowledge Gate</button>
     </div>
   </div>
   <div class="decision-callout">
@@ -595,7 +763,7 @@ def render_human_review_notice(review: HumanReviewState) -> str:
     action = review.required_actions[0] if review.required_actions else "Resolve the open evidence and verification packet."
     return f"""
   <div class="review-notice {review_status_class(review.status)}">
-    <strong>Why human review is {escape(review.status)}:</strong>
+    <strong>Why human review is {escape(readable_state(review.status))}:</strong>
     <p>{escape(reason)}</p>
     <p><span class="label-inline">Next</span> {escape(action)}</p>
     <p><span class="label-inline">Meaning</span> The agent may provide a provisional decision frame, but it must not present this as execution-ready or take/broker action.</p>
@@ -1007,11 +1175,22 @@ def render_human_review_panel(result: ConsoleResult) -> str:
   <div class="panel-title">
     <div>
       <h2>Human Review Gate</h2>
-      <p class="subtle">Queued means policy review required, not a frozen backend job.</p>
+      <p class="subtle">Operator review is a gate decision. It does not override missing evidence or verifier obligations.</p>
     </div>
-    <span class="pill {review_status_class(review.status)}">{escape(review.status)}</span>
+    <span id="humanReviewStatusPill" class="pill {review_status_class(review.status)}">{escape(readable_state(review.status))}</span>
   </div>
   {notice}
+  <div class="review-actions">
+    <label for="humanReviewNote">Operator note</label>
+    <textarea id="humanReviewNote" rows="3" placeholder="Evidence checked, concern, or reason for approval/rejection"></textarea>
+    <div class="button-row">
+      <button type="button" data-review-action="start_review">Start Review</button>
+      <button type="button" data-review-action="approve">Approve Gate</button>
+      <button type="button" data-review-action="request_changes">Request Changes</button>
+      <button type="button" data-review-action="reject">Reject Frame</button>
+    </div>
+    <p id="humanReviewResult" class="capture-state">No operator decision submitted in this browser session.</p>
+  </div>
   <dl class="kv">
     <dt>required</dt><dd>{escape(str(review.required).lower())}</dd>
     <dt>risk</dt><dd>{escape(review.risk_level)}</dd>
@@ -1647,6 +1826,15 @@ form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; 
 .review-notice.verified { border-color: #9ccdad; background: #eefaf3; }
 .review-notice.neutral { color: var(--gray); }
 .review-notice p { font-size: 14px; line-height: 1.45; }
+.review-actions {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
 .label-inline {
   color: var(--muted);
   font-size: 12px;
@@ -1707,10 +1895,46 @@ const speechInput = document.querySelector("#speech_text");
 const queryInput = document.querySelector("#query");
 const captureState = document.querySelector("#captureState");
 const copyAnswerButton = document.querySelector("#copyAnswer");
-const markReviewedButton = document.querySelector("#markReviewed");
 const decisionPanel = document.querySelector("#decisionPanel");
+const ledgerPayload = document.querySelector("#ledgerPayload");
+const humanReviewNote = document.querySelector("#humanReviewNote");
+const humanReviewResult = document.querySelector("#humanReviewResult");
+const humanReviewStatusPill = document.querySelector("#humanReviewStatusPill");
 let recorder = null;
 let chunks = [];
+
+function currentLedgerPayload() {
+  try {
+    return JSON.parse(ledgerPayload?.textContent || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function setLedgerPayload(ledger) {
+  if (ledgerPayload && ledger) ledgerPayload.textContent = JSON.stringify(ledger);
+}
+
+function pillClassForReview(status) {
+  if (status === "approved" || status === "not_required") return "verified";
+  if (status === "queued" || status === "in_review") return "review";
+  if (status === "changes_requested") return "clarify";
+  if (status === "rejected") return "blocked";
+  return "neutral";
+}
+
+function readableStatus(status) {
+  const labels = {
+    approved: "approved",
+    changes_requested: "changes requested",
+    in_review: "in human review",
+    needs_more_info: "needs more information",
+    not_required: "not required",
+    queued: "queued for human review",
+    rejected: "rejected"
+  };
+  return labels[status] || String(status || "").replaceAll("_", " ");
+}
 
 function appendFile(file) {
   const transfer = new DataTransfer();
@@ -1742,12 +1966,37 @@ copyAnswerButton?.addEventListener("click", async () => {
   setTimeout(() => { copyAnswerButton.textContent = "Copy Answer"; }, 1400);
 });
 
-markReviewedButton?.addEventListener("click", () => {
-  markReviewedButton.textContent = "Gate Acknowledged";
-  markReviewedButton.disabled = true;
-  decisionPanel?.querySelectorAll(".pill.review, .pill.clarify").forEach(item => {
-    item.classList.remove("review", "clarify");
-    item.classList.add("verified");
+document.querySelectorAll("[data-review-action]").forEach(button => {
+  button.addEventListener("click", async () => {
+    const action = button.dataset.reviewAction;
+    button.disabled = true;
+    if (humanReviewResult) humanReviewResult.textContent = "submitting operator review...";
+    try {
+      const response = await fetch("/api/human-review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action,
+          note: humanReviewNote?.value || "",
+          operator: "console_operator",
+          ledger: currentLedgerPayload()
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "review failed");
+      setLedgerPayload(payload.ledger);
+      if (humanReviewStatusPill) {
+        humanReviewStatusPill.className = `pill ${pillClassForReview(payload.human_review.status)}`;
+        humanReviewStatusPill.textContent = readableStatus(payload.human_review.status);
+      }
+      if (humanReviewResult) {
+        humanReviewResult.textContent = `${payload.operator_message} Gate: ${payload.decision_gate_label}.`;
+      }
+    } catch (error) {
+      if (humanReviewResult) humanReviewResult.textContent = error.message || "review failed";
+    } finally {
+      button.disabled = false;
+    }
   });
 });
 
