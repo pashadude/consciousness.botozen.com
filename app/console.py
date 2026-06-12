@@ -366,10 +366,10 @@ def render_header(result: ConsoleResult) -> str:
     <p class="subtle">q -> theta -> s | ledger {escape(result.ledger.ledger_id)}</p>
   </div>
   <div class="status-strip">
-    <span class="pill {status_class(result.ledger.status)}">{escape(result.ledger.status)}</span>
-    <span class="pill {verify_class}">verify {'pass' if result.verification_passed else 'blocked'}</span>
-    <span class="pill {gate_class}">gate {escape(result.ledger.decision_gate)}</span>
-    <span class="pill {route_status_class(route_mode)}">{escape(route_mode)}</span>
+    <span class="pill {status_class(result.ledger.status)}">Spec: {escape(readable_state(result.ledger.status))}</span>
+    <span class="pill {verify_class}">Verifier: {'passed' if result.verification_passed else 'blocked'}</span>
+    <span class="pill {gate_class}">Gate: {escape(readable_state(result.ledger.decision_gate))}</span>
+    <span class="pill {route_status_class(route_mode)}">Route: {escape(readable_state(route_mode))}</span>
   </div>
 </header>
 """
@@ -388,6 +388,7 @@ def render_workspace(
     {render_status_panel(env)}
   </section>
   <section class="center-rail">
+    {render_operator_route_panel(result)}
     {render_decision_summary_panel(result)}
     {render_game_panel(result)}
     {render_source_layer_panel(result)}
@@ -430,6 +431,121 @@ def render_input_form(text: str) -> str:
 """
 
 
+def render_operator_route_panel(result: ConsoleResult) -> str:
+    steps = build_operator_route_steps(result)
+    rows = "\n".join(
+        f"""
+<li class="{escape(css_class)}">
+  <span class="route-index">{index}</span>
+  <div>
+    <strong>{escape(title)}</strong>
+    <span>{escape(state_label)}</span>
+    <p>{escape(detail)}</p>
+  </div>
+</li>
+"""
+        for index, title, state_label, detail, css_class in steps
+    )
+    return f"""
+<section class="panel route-progress-panel">
+  <div class="panel-title">
+    <div>
+      <h2>Route Before Decision</h2>
+      <p class="subtle">The decision frame below is provisional until each required route step clears.</p>
+    </div>
+    <span class="pill {gate_status_class(result.ledger.decision_gate)}">{escape(readable_state(result.ledger.decision_gate))}</span>
+  </div>
+  <ol class="route-steps">{rows}</ol>
+</section>
+"""
+
+
+def build_operator_route_steps(result: ConsoleResult) -> list[tuple[int, str, str, str, str]]:
+    ledger = result.ledger
+    formal_missing = latest_missing_formal_obligations(ledger)
+    source_status = result.rag_result.status
+    review = ledger.human_review
+    route_mode = str(getattr(result.route_decision, "mode", "sync"))
+    spec_missing = [item.field for item in ledger.ambiguities]
+    decision_clear = result.verification_passed and ledger.decision_gate != "needs_more_info"
+
+    source_class = source_status_class(source_status)
+    if source_status in {"retrieved", "empty"}:
+        source_label = "Complete" if source_status == "retrieved" else "No cited source found"
+    elif source_status in {"missing_config", "provider_error"}:
+        source_label = "Blocked"
+    else:
+        source_label = "Running"
+
+    review_class = review_status_class(review.status) if review.required else "neutral"
+    review_label = "Not required" if not review.required else readable_state(review.status)
+    review_detail = (
+        "No human-review gate applies to this request."
+        if not review.required
+        else (review.required_actions[0] if review.required_actions else review.reasons[0] if review.reasons else "Reviewer approval is required.")
+    )
+
+    return [
+        (
+            1,
+            "Input captured",
+            "Complete" if ledger.expressed_query else "Waiting",
+            "User query and attached artifacts were accepted by the console.",
+            "verified" if ledger.expressed_query else "clarify",
+        ),
+        (
+            2,
+            "Shared spec inferred",
+            "Needs clarification" if spec_missing else "Complete",
+            (
+                "Missing fields: " + ", ".join(spec_missing)
+                if spec_missing
+                else f"goal={ledger.goal or 'set'}, audience={ledger.audience or 'set'}, format={ledger.output_format or 'set'}"
+            ),
+            "blocked" if spec_missing else "verified",
+        ),
+        (
+            3,
+            "Sources and retrieval",
+            source_label,
+            f"{result.rag_result.provider}: {source_status}; cited items={len(result.rag_result.evidence)}.",
+            source_class,
+        ),
+        (
+            4,
+            "Formal obligations",
+            "Needs clarification" if formal_missing else "Complete",
+            (
+                "Missing formal spec fields: " + ", ".join(formal_missing)
+                if formal_missing
+                else "No missing formal obligations in the latest formalization pass."
+            ),
+            "blocked" if formal_missing else "verified",
+        ),
+        (
+            5,
+            "Verifier",
+            "Passed" if result.verification_passed else "Blocked",
+            "Verifier found no blocking issue." if result.verification_passed else "Verifier still has blocking findings.",
+            "verified" if result.verification_passed else "blocked",
+        ),
+        (
+            6,
+            "Human gate",
+            review_label,
+            review_detail,
+            review_class,
+        ),
+        (
+            7,
+            "Decision frame",
+            "Decision-ready" if decision_clear else "Provisional",
+            f"Decision gate is {readable_state(ledger.decision_gate)}; route mode is {readable_state(route_mode)}.",
+            "verified" if decision_clear else "clarify",
+        ),
+    ]
+
+
 def render_decision_summary_panel(result: ConsoleResult) -> str:
     ledger = result.ledger
     answer_lines = build_provisional_answer(result)
@@ -453,7 +569,7 @@ def render_decision_summary_panel(result: ConsoleResult) -> str:
     </div>
   </div>
   <div class="decision-callout">
-    <span class="decision-label">{escape(ledger.decision_gate)}</span>
+    <span class="decision-label">{escape(readable_state(ledger.decision_gate))}</span>
     <p>{escape(primary)}</p>
   </div>
   {review_notice}
@@ -490,12 +606,22 @@ def render_human_review_notice(review: HumanReviewState) -> str:
 def render_status_panel(env: Mapping[str, str]) -> str:
     items = design_status(env) + google_status(env)
     rows = "\n".join(
-        f'<div class="status-row"><span class="dot {escape(item.status)}"></span><span>{escape(item.label)}</span></div>'
+        f"""
+<div class="status-row">
+  <span class="dot {escape(item.status)}"></span>
+  <span class="status-word {escape(item.status)}">{escape(status_word(item.status))}</span>
+  <div>
+    <strong>{escape(item.label)}</strong>
+    <span>{escape(item.detail)}</span>
+  </div>
+</div>
+"""
         for item in items
     )
     return f"""
 <section class="panel">
   <h2>Platform State</h2>
+  {render_status_legend()}
   <div class="status-grid">{rows}</div>
 </section>
 """
@@ -681,7 +807,7 @@ def render_formal_proof_panel(result: ConsoleResult) -> str:
     rows = "\n".join(
         f"""
 <li class="{escape(item.status)}">
-  <strong>{escape(item.theorem_name)} / {escape(item.status)}</strong>
+  <strong>{escape(readable_theorem_name(item.theorem_name))} / {escape(readable_state(item.status))}</strong>
   <span>{escape(item.check_id)}</span>
   <p>{escape(item.statement)}</p>
 </li>
@@ -785,7 +911,7 @@ def render_spec_panel(result: ConsoleResult) -> str:
 <section class="panel spec-panel">
   <div class="panel-title">
     <h2>Shared Specification</h2>
-    <span class="muted">{escape(ledger.decision_gate)}</span>
+    <span class="muted">{escape(readable_state(ledger.decision_gate))}</span>
   </div>
   <div class="spec-grid">
     <div><span class="label">q</span><p>{escape(ledger.expressed_query or ledger.user_request)}</p></div>
@@ -1064,8 +1190,8 @@ def build_generic_answer_lines(result: ConsoleResult) -> list[str]:
         ),
         (
             f"Verification: {'passed' if result.verification_passed else 'blocked'}; "
-            f"decision gate={ledger.decision_gate}; "
-            f"human review={ledger.human_review.status}."
+            f"decision gate={readable_state(ledger.decision_gate)}; "
+            f"human review={readable_state(ledger.human_review.status)}."
         ),
     ]
     next_line = next_action_line(ledger, recommendation)
@@ -1227,6 +1353,67 @@ def proof_status_class(status: str) -> str:
     }.get(status, "neutral")
 
 
+def status_word(status: str) -> str:
+    return {
+        "green": "Ready",
+        "blue": "Running",
+        "red": "Off",
+        "yellow": "Optional",
+        "verified": "Ready",
+        "blocked": "Blocked",
+        "clarify": "Needs input",
+        "running": "Running",
+        "async": "Async",
+        "review": "Review",
+        "neutral": "Info",
+    }.get(status, readable_state(status))
+
+
+def readable_state(value: str) -> str:
+    return {
+        "analysis_ready": "analysis ready",
+        "async": "async job queued",
+        "async_pending": "async job pending",
+        "blocked": "blocked",
+        "clarifying": "needs user clarification",
+        "configured": "configured",
+        "empty": "no evidence returned",
+        "finalized": "finalized",
+        "go": "go-ready",
+        "in_review": "in human review",
+        "missing_config": "missing configuration",
+        "needs_more_info": "needs more information",
+        "not_required": "not required",
+        "planned": "planned",
+        "provider_error": "provider error",
+        "queued": "queued for human review",
+        "ready": "ready",
+        "retrieved": "retrieved",
+        "sync": "sync path",
+    }.get(value, value.replace("_", " "))
+
+
+def readable_theorem_name(value: str) -> str:
+    return {
+        "no_finalize_when_needs_more_info": "cannot finalize while more information is needed",
+        "no_finalize_with_open_proofs": "cannot finalize with open proof obligations",
+        "no_finalize_with_required_review": "cannot finalize with required human review",
+        "no_finalize_with_high_severity_findings": "cannot finalize with high-severity findings",
+        "finalize_allowed_when_no_hard_gates": "finalization allowed when hard gates are clear",
+    }.get(value, readable_state(value))
+
+
+def render_status_legend() -> str:
+    return """
+  <div class="status-legend">
+    <span><i class="dot green"></i>Ready or active</span>
+    <span><i class="dot yellow"></i>Optional or needs input</span>
+    <span><i class="dot red"></i>Missing or blocked</span>
+    <span><i class="dot blue"></i>Running now</span>
+  </div>
+"""
+
+
 def gate_status_class(status: str) -> str:
     return {
         "ready": "verified",
@@ -1368,12 +1555,52 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; background: #e9f3ff; }
 .capture-state { color: var(--muted); font-size: 13px; min-height: 18px; }
 .status-grid { display: grid; gap: 8px; margin-top: 12px; }
-.status-row { display: grid; grid-template-columns: 14px 1fr; gap: 8px; align-items: center; font-size: 13px; }
+.status-row { display: grid; grid-template-columns: 12px 70px minmax(0, 1fr); gap: 8px; align-items: start; font-size: 13px; }
+.status-row strong { display: block; font-size: 13px; line-height: 1.25; }
+.status-row span:last-child, .status-row div span { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; margin-top: 2px; }
+.status-word { font-size: 11px; text-transform: uppercase; letter-spacing: 0; line-height: 1.2; }
+.status-word.green { color: var(--green); }
+.status-word.red { color: var(--red); }
+.status-word.blue { color: var(--blue); }
+.status-word.yellow { color: var(--amber); }
+.status-legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+.status-legend span { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 .dot.green { background: var(--green); }
 .dot.red { background: var(--red); }
 .dot.blue { background: var(--blue); }
 .dot.yellow { background: var(--amber); }
+.route-steps { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.route-steps li {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfb;
+}
+.route-steps li.verified { border-color: #9ccdad; background: #eefaf3; }
+.route-steps li.blocked { border-color: #e2a29d; background: #fff3f2; }
+.route-steps li.clarify { border-color: #e3cc95; background: #fff8e7; }
+.route-steps li.running { border-color: #b8cbe2; background: #eff6ff; }
+.route-steps li.review { border-color: #9acbc6; background: #eefaf8; }
+.route-steps li.neutral { border-color: var(--line); background: #f9faf8; }
+.route-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+.route-steps strong { display: block; font-size: 14px; line-height: 1.25; }
+.route-steps div > span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; text-transform: uppercase; }
+.route-steps p { font-size: 13px; line-height: 1.4; margin-top: 5px; overflow-wrap: anywhere; }
 .decision-panel {
   border-width: 2px;
   background: #ffffff;
@@ -1492,10 +1719,10 @@ inputForm?.addEventListener("submit", () => {
   inputForm.classList.add("running");
   if (runButton) {
     runButton.disabled = true;
-    runButton.textContent = "Running...";
+    runButton.textContent = "Running route...";
   }
   if (captureState) {
-    captureState.textContent = "running spec game: retrieving sources, verifying, and building answer";
+    captureState.textContent = "running route: input -> spec -> sources -> formal checks -> verifier -> gate -> decision";
   }
 });
 

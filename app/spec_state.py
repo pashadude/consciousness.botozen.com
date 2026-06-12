@@ -1337,7 +1337,7 @@ def build_formal_proof_checks(ledger: SpecLedger) -> list[FormalProofCheckRecord
                 theorem_name="no_finalize_when_needs_more_info",
                 source_type="decision_gate",
                 source_id=ledger.decision_gate,
-                statement="A spec with decision_gate=needs_more_info cannot be finalized.",
+                statement="A spec that needs more information cannot be finalized.",
                 theorem_body=(
                     "theorem no_finalize_when_needs_more_info (g : SpecGate) :\n"
                     "  g.needsMoreInfo -> Not (finalizeAllowed g) := by\n"
@@ -1553,7 +1553,7 @@ def equilibrium_conflicts(
 ) -> list[str]:
     conflicts: list[str] = []
     if gate_blocked:
-        conflicts.append("Finalize conflicts with decision_gate=needs_more_info.")
+        conflicts.append("Finalize conflicts with a gate that still needs more information.")
     if open_proofs:
         conflicts.append("Finalize/propose conflicts with open proof obligations.")
     if open_formal_proofs:

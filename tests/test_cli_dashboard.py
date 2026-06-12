@@ -20,7 +20,7 @@ def test_dashboard_renders_core_sections_without_color() -> None:
     assert "decision_rule: pareto_nondominated" in output
 
 
-def test_dashboard_marks_configured_google_services_blue() -> None:
+def test_dashboard_marks_configured_google_services_ready() -> None:
     env = {
         "GOOGLE_GENAI_USE_VERTEXAI": "true",
         "GOOGLE_CLOUD_PROJECT": "grant-project",
@@ -40,19 +40,19 @@ def test_dashboard_marks_configured_google_services_blue() -> None:
 
     output = render_dashboard("Brent/WTI bounce?", env=env, color=False)
 
-    assert "ON  Vertex AI Gemini auth" in output
-    assert "ON  Cheap model: gemini-3.5-flash" in output
-    assert "ON  Strong model: gemini-3.5-flash" in output
-    assert "ON  Verifier model: gemini-3.5-flash" in output
-    assert "ON  Gemini multimodal embeddings" in output
-    assert "ON  Model Armor" in output
-    assert "ON  BigQuery analytics: adk_agent_analytics" in output
-    assert "ON  MCP research tools" in output
-    assert "ON  Trader source layer" in output
+    assert "OK  Vertex AI Gemini auth" in output
+    assert "OK  Cheap model: gemini-3.5-flash" in output
+    assert "OK  Strong model: gemini-3.5-flash" in output
+    assert "OK  Verifier model: gemini-3.5-flash" in output
+    assert "OK  Gemini multimodal embeddings" in output
+    assert "OK  Model Armor" in output
+    assert "OK  BigQuery analytics: adk_agent_analytics" in output
+    assert "OK  MCP research tools" in output
+    assert "OK  Trader source layer" in output
     assert "token_cost_est_usd: 0.020400" in output
 
 
-def test_dashboard_uses_green_blue_red_ansi_markers_when_color_enabled() -> None:
+def test_dashboard_uses_green_yellow_red_ansi_markers_when_color_enabled() -> None:
     env = {
         "GOOGLE_GENAI_USE_VERTEXAI": "true",
         "GOOGLE_CLOUD_PROJECT": "grant-project",
@@ -63,8 +63,8 @@ def test_dashboard_uses_green_blue_red_ansi_markers_when_color_enabled() -> None
     output = render_dashboard("arb?", env=env, color=True)
 
     assert "\033[32mOK\033[0m" in output
-    assert "\033[34mON\033[0m" in output
-    assert "\033[31mNO\033[0m" in output
+    assert "\033[33mSKIP\033[0m" in output
+    assert "\033[31mOFF\033[0m" in output
 
 
 def test_dashboard_requires_opoint_key_for_opoint_mcp() -> None:
@@ -74,7 +74,7 @@ def test_dashboard_requires_opoint_key_for_opoint_mcp() -> None:
         color=False,
     )
 
-    assert "NO  MCP research tools" in output
+    assert "OFF  MCP research tools" in output
 
     output_with_key = render_dashboard(
         "test",
@@ -85,7 +85,7 @@ def test_dashboard_requires_opoint_key_for_opoint_mcp() -> None:
         color=False,
     )
 
-    assert "ON  MCP research tools" in output_with_key
+    assert "OK  MCP research tools" in output_with_key
 
 
 def test_dashboard_marks_live_telemetry_collectors_when_configured() -> None:

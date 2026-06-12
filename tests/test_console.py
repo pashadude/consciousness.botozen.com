@@ -14,6 +14,7 @@ def test_console_home_renders_multimodal_operator_surface() -> None:
     assert "Mutual Spec Console" in response.text
     assert 'accept="image/*,audio/*,application/pdf,text/*"' in response.text
     assert "Record Speech" in response.text
+    assert "Route Before Decision" in response.text
     assert "Model-Region Frontier" in response.text
 
 

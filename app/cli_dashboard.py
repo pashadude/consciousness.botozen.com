@@ -191,32 +191,32 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
     return [
         StatusItem(
             "Vertex AI Gemini auth",
-            "blue" if vertex_enabled and project and location else "red",
+            "green" if vertex_enabled and project and location else "red",
             "GOOGLE_GENAI_USE_VERTEXAI + project + location",
         ),
         StatusItem(
             "Gemini API key fallback",
-            "blue" if api_key or (vertex_enabled and project and location) else "red",
-            "configured" if api_key else "not needed when Vertex AI auth is active",
+            "green" if api_key else "yellow" if vertex_enabled and project and location else "red",
+            "configured" if api_key else "optional; Vertex AI auth is active",
         ),
         StatusItem(
             "Cheap model",
-            "blue" if has_google_auth else "red",
+            "green" if has_google_auth else "red",
             env.get("MUTUAL_SPEC_CHEAP_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Strong model",
-            "blue" if has_google_auth else "red",
+            "green" if has_google_auth else "red",
             env.get("MUTUAL_SPEC_STRONG_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Verifier model",
-            "blue" if has_google_auth else "red",
+            "green" if has_google_auth else "red",
             env.get("MUTUAL_SPEC_VERIFIER_MODEL", "gemini-3.5-flash"),
         ),
         StatusItem(
             "Gemini multimodal embeddings",
-            "blue"
+            "green"
             if has_google_auth
             and parse_bool(env.get("MULTIMODAL_RETRIEVAL_ENABLED"), False)
             else "red",
@@ -224,12 +224,12 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
         ),
         StatusItem(
             "Model Armor",
-            "blue" if model_armor else "red",
+            "green" if model_armor else "red",
             "MODEL_ARMOR_TEMPLATE or TEMPLATE_ID",
         ),
         StatusItem(
             "BigQuery analytics",
-            "blue"
+            "green"
             if project
             and parse_bool(env.get("BQ_ANALYTICS_ENABLED"), False)
             and configured_value(env.get("BQ_ANALYTICS_DATASET_ID"))
@@ -238,12 +238,12 @@ def google_status(env: Mapping[str, str]) -> list[StatusItem]:
         ),
         StatusItem(
             "MCP research tools",
-            "blue" if mcp else "red",
+            "green" if mcp else "red",
             "MCP_RESEARCH_URL or MCP_RESEARCH_COMMAND (+ OPOINT_API_KEY for Opoint)",
         ),
         StatusItem(
             "Trader source layer",
-            "blue" if trader_source_configured else "red",
+            "green" if trader_source_configured else "red",
             "Spanner RAG, Google search, google_cse keys, Vertex AI Search, or MCP/Opoint",
         ),
     ]
@@ -326,9 +326,9 @@ def render_status_section(title_text: str, items: list[StatusItem], *, color: bo
     for item in items:
         marker = {
             "green": "OK",
-            "blue": "ON",
-            "red": "NO",
-            "yellow": "??",
+            "blue": "RUN",
+            "red": "OFF",
+            "yellow": "SKIP",
         }.get(item.status, "--")
         lines.append(
             f"{paint(marker, item.status, color=color):>12}  {item.label}: {item.detail}"
