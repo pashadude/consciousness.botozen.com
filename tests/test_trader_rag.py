@@ -4,6 +4,7 @@ import json
 from app.spec_state import SpecLedger, update_ledger_from_user_text
 from app.trader_rag import (
     SearchEvidence,
+    TraderSourceConfig,
     apply_rag_to_ledger,
     default_opoint_mcp_command,
     exception_summary,
@@ -12,6 +13,8 @@ from app.trader_rag import (
     records_from_mcp_payload,
     run_async_mcp,
     run_trader_rag,
+    spanner_row_is_self_memory,
+    spanner_rows_to_evidence,
     spanner_scan_terms,
 )
 
@@ -115,6 +118,52 @@ def test_spanner_scan_terms_preserve_phrases_and_drop_generic_terms() -> None:
     assert "mutual specification game" in terms
     assert "trader" in terms
     assert "task" not in terms
+
+
+def test_spanner_rag_excludes_console_user_talk_memory_from_evidence() -> None:
+    config = TraderSourceConfig(
+        provider="spanner_rag",
+        google_agent_search_enabled=False,
+        max_queries=3,
+        max_results=5,
+        timeout_seconds=6,
+        google_cloud_project="zenpulsar",
+        spanner_instance_id="commodity-rag",
+        spanner_database_id="trader_rag",
+        spanner_chunks_table="RagChunks",
+    )
+    self_memory_row = (
+        "self-chunk",
+        "self-doc",
+        "mutual_spec_user_talks",
+        "Title: Look i have an offer of 50000 tonns of sulfur in Iraq...",
+        "2026-06-11T12:46:23Z",
+        "console_user_talk_log",
+        ["human_ai_coordination", "sulfur", "trader_workflow"],
+        ["conversation_trace", "mutual_specification_game", "trader_agent"],
+    )
+    market_row = (
+        "market-chunk",
+        "market-doc",
+        "commodity_articles",
+        "Title: Middle East sulfur price benchmark\nSulfur market context near Umm Qasr.",
+        "2026-06-10T00:00:00Z",
+        "commodity_news",
+        ["sulfur"],
+        ["market_price", "benchmark"],
+    )
+
+    evidence = spanner_rows_to_evidence(
+        [self_memory_row, market_row],
+        query='"sulfur" "Umm Qasr" FOB price',
+        config=config,
+        limit=5,
+    )
+
+    assert spanner_row_is_self_memory(self_memory_row)
+    assert not spanner_row_is_self_memory(market_row)
+    assert [item.title for item in evidence] == ["Middle East sulfur price benchmark"]
+    assert "console_user_talk_log" not in evidence[0].summary
 
 
 def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:

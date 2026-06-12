@@ -33,6 +33,15 @@ from app.spec_state import (
 )
 
 DEFAULT_SOURCE_LAYER_CONFIG = Path("config/trader_source_layer.yaml")
+EXCLUDED_SPANNER_EVIDENCE_SOURCES = {"console_user_talk_log"}
+EXCLUDED_SPANNER_SOURCE_DATASETS = {"mutual_spec_user_talks"}
+EXCLUDED_SPANNER_TAGS = {
+    "conversation_trace",
+    "mutual_specification_game",
+    "proof_carrying_response",
+    "specification_ledger",
+    "trader_agent",
+}
 
 
 @dataclass(frozen=True)
@@ -817,7 +826,9 @@ def run_spanner_provider(
             warnings.append(f"Spanner RAG failed for `{query}`: {exc}")
     deduped = dedupe_evidence(evidence)[: config.max_results]
     if not deduped and not warnings:
-        warnings.append(f"Private corpus target {resource} returned no matching chunks.")
+        warnings.append(
+            f"Private corpus target {resource} returned no eligible market/news chunks after excluding console user-talk memory."
+        )
     return TraderRagResult(
         provider="spanner_rag",
         status="retrieved" if deduped else "provider_error" if warnings else "empty",
@@ -835,6 +846,7 @@ def query_spanner_chunks(
     limit: int,
 ) -> list[SearchEvidence]:
     table = safe_spanner_identifier(config.spanner_chunks_table or "RagChunks")
+    search_limit = min(max(limit * 4, limit), 50)
     from google.cloud import spanner
 
     database = (
@@ -847,7 +859,7 @@ def query_spanner_chunks(
             database=database,
             table=table,
             query=query,
-            limit=limit,
+            limit=search_limit,
             param_types=spanner.param_types,
         )
     except Exception as search_exc:
@@ -856,17 +868,46 @@ def query_spanner_chunks(
                 database=database,
                 table=table,
                 query=query,
-                limit=limit,
+                limit=search_limit,
                 param_types=spanner.param_types,
             )
         except Exception as fallback_exc:
             raise RuntimeError(
                 f"full-text search failed ({search_exc}); fallback scan failed ({fallback_exc})"
             ) from fallback_exc
+    return spanner_rows_to_evidence(rows, query=query, config=config, limit=limit)
+
+
+def spanner_rows_to_evidence(
+    rows: list[Any],
+    *,
+    query: str,
+    config: TraderSourceConfig,
+    limit: int,
+) -> list[SearchEvidence]:
     evidence: list[SearchEvidence] = []
     for row in rows:
+        if spanner_row_is_self_memory(row):
+            continue
         evidence.append(spanner_row_to_evidence(row, query=query, config=config))
+        if len(evidence) >= limit:
+            break
     return evidence
+
+
+def spanner_row_is_self_memory(row: Any) -> bool:
+    try:
+        _chunk_id, _doc_id, source_dataset, _chunk_text, _published_at, source, _commodities, tags = row
+    except (TypeError, ValueError):
+        return False
+    source_value = str(source or "").strip().lower()
+    dataset_value = str(source_dataset or "").strip().lower()
+    tag_values = {str(item or "").strip().lower() for item in (tags or [])}
+    return (
+        source_value in EXCLUDED_SPANNER_EVIDENCE_SOURCES
+        or dataset_value in EXCLUDED_SPANNER_SOURCE_DATASETS
+        or bool(tag_values & EXCLUDED_SPANNER_TAGS)
+    )
 
 
 def execute_spanner_search(
