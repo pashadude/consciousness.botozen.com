@@ -8,8 +8,10 @@ from app.trader_rag import (
     apply_rag_to_ledger,
     dedupe_evidence,
     default_opoint_mcp_command,
+    evidence_relevance,
     exception_summary,
     filter_evidence_by_query,
+    filter_evidence_for_queries,
     load_trader_source_config,
     mcp_search_arguments,
     mcp_stdio_env,
@@ -169,6 +171,51 @@ def test_spanner_rag_excludes_console_user_talk_memory_from_evidence() -> None:
     assert "console_user_talk_log" not in evidence[0].summary
 
 
+def test_spanner_rag_filters_irrelevant_private_chunks() -> None:
+    config = TraderSourceConfig(
+        provider="spanner_rag",
+        google_agent_search_enabled=False,
+        max_queries=3,
+        max_results=5,
+        timeout_seconds=6,
+        google_cloud_project="zenpulsar",
+        spanner_instance_id="commodity-rag",
+        spanner_database_id="trader_rag",
+        spanner_chunks_table="RagChunks",
+    )
+    irrelevant_row = (
+        "sugar-chunk",
+        "sugar-doc",
+        "commodity_articles",
+        "Title: Thailand dry spell advisory\nSugarcane farmers advised to mulch fields.",
+        "2026-06-10T00:00:00Z",
+        "commodity_news",
+        ["sugar"],
+        ["weather", "agriculture"],
+    )
+    relevant_row = (
+        "sulfur-chunk",
+        "sulfur-doc",
+        "commodity_articles",
+        "Title: Iraq sulfur export checks\nSulfur cargoes and Umm Qasr loading inspections remain active.",
+        "2026-06-10T00:00:00Z",
+        "commodity_news",
+        ["sulfur"],
+        ["logistics", "inspection"],
+    )
+
+    evidence = spanner_rows_to_evidence(
+        [irrelevant_row, relevant_row],
+        query='"sulfur" "Umm Qasr" FOB price',
+        config=config,
+        limit=5,
+    )
+
+    assert [item.title for item in evidence] == ["Iraq sulfur export checks"]
+    assert evidence[0].relevance_score >= 2.0
+    assert "sulfur" in evidence[0].relevance_reasons
+
+
 def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:
     def fake_query_spanner_chunks(query, *, config, limit):
         return [
@@ -261,7 +308,81 @@ def test_external_evidence_filter_drops_irrelevant_opoint_articles() -> None:
         source="opoint_mcp",
     )
 
-    assert filter_evidence_by_query([irrelevant, relevant], query) == [relevant]
+    filtered = filter_evidence_by_query([irrelevant, relevant], query)
+
+    assert [item.evidence_id for item in filtered] == [relevant.evidence_id]
+    assert filtered[0].relevance_score >= 2.0
+
+
+def test_rag_relevance_eval_blocks_generic_and_unrelated_noise() -> None:
+    query = '"sulfur" "Umm Qasr" FOB price'
+    candidates = [
+        SearchEvidence(
+            evidence_id="mcp:generic",
+            title="Commodity market price benchmark",
+            url="https://example.test/generic",
+            summary="Generic market commentary on risk, payment, and documents.",
+            query=query,
+            source="opoint_mcp",
+        ),
+        SearchEvidence(
+            evidence_id="mcp:sugar",
+            title="Thailand sugarcane drought advisory",
+            url="https://example.test/sugar",
+            summary="Dry spell conditions affect sugarcane crops.",
+            query=query,
+            source="opoint_mcp",
+        ),
+        SearchEvidence(
+            evidence_id="mcp:sulfur",
+            title="Umm Qasr sulfur loading inspection update",
+            url="https://example.test/sulfur",
+            summary="Iraq sulfur FOB cargoes require inspection documents.",
+            query=query,
+            source="opoint_mcp",
+        ),
+    ]
+
+    relevant = filter_evidence_for_queries(candidates)
+
+    assert [item.evidence_id for item in relevant] == ["mcp:sulfur"]
+    score, reasons = evidence_relevance(relevant[0], query)
+    assert score >= 6.0
+    assert {"sulfur", "umm qasr", "fob"}.issubset(set(reasons))
+
+
+def test_mcp_provider_returns_empty_when_only_irrelevant_results(monkeypatch) -> None:
+    async def fake_fetch_mcp_search_records(query, *, config, limit):
+        return [
+            {
+                "title": "Thailand sugarcane drought advisory",
+                "url": "https://example.test/sugar",
+                "summary": "Dry spell conditions affect sugarcane crops.",
+                "source_name": "Opoint Test Wire",
+            }
+        ]
+
+    monkeypatch.setattr(
+        "app.trader_rag.fetch_mcp_search_records",
+        fake_fetch_mcp_search_records,
+    )
+    ledger = SpecLedger()
+    update_ledger_from_user_text(ledger, SULFUR_OFFER)
+
+    result = run_trader_rag(
+        SULFUR_OFFER,
+        env={
+            "TRADER_RAG_PROVIDER": "mcp",
+            "OPOINT_API_KEY": "test-key",
+            "TRADER_RAG_MAX_RESULTS": "2",
+        },
+        search_plan=ledger.search_plan,
+    )
+
+    assert result.provider == "opoint_mcp"
+    assert result.status == "empty"
+    assert result.evidence == []
+    assert any("none matched material query terms" in warning for warning in result.warnings)
 
 
 def test_evidence_dedupe_collapses_mirror_urls_by_title() -> None:

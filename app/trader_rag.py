@@ -13,7 +13,7 @@ import threading
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -33,18 +33,25 @@ from app.spec_state import (
 )
 
 DEFAULT_SOURCE_LAYER_CONFIG = Path("config/trader_source_layer.yaml")
-EXCLUDED_SPANNER_EVIDENCE_SOURCES = {"console_user_talk_log"}
+DEFAULT_MIN_RELEVANCE_SCORE = 2.0
+EXCLUDED_SPANNER_EVIDENCE_SOURCES = {
+    "console_human_review_log",
+    "console_user_talk_log",
+}
 EXCLUDED_SPANNER_SOURCE_DATASETS = {"mutual_spec_user_talks"}
 EXCLUDED_SPANNER_TAGS = {
     "conversation_trace",
+    "human_review",
     "mutual_specification_game",
     "proof_carrying_response",
     "specification_ledger",
     "trader_agent",
+    "user_talk",
 }
 RELEVANCE_STOP_TERMS = {
     "benchmark",
     "cargo",
+    "commodity",
     "context",
     "counterparty",
     "documents",
@@ -58,7 +65,46 @@ RELEVANCE_STOP_TERMS = {
     "price",
     "risk",
     "shipping",
+    "should",
     "terms",
+    "tonnes",
+    "tons",
+    "trade",
+    "trader",
+    "verify",
+    "verification",
+}
+HIGH_VALUE_RELEVANCE_TERMS = {
+    "aluminum",
+    "aluminium",
+    "ammonia",
+    "basra",
+    "brent",
+    "cfr",
+    "copper",
+    "dap",
+    "diesel",
+    "ercot",
+    "fertilizer",
+    "fob",
+    "freight",
+    "gasoline",
+    "iraq",
+    "jkm",
+    "lng",
+    "map",
+    "nickel",
+    "pjm",
+    "potash",
+    "rbob",
+    "sugar",
+    "sulfur",
+    "sulphur",
+    "ttf",
+    "ulsd",
+    "urea",
+    "umm qasr",
+    "wti",
 }
 
 
@@ -71,6 +117,8 @@ class SearchEvidence:
     query: str
     source: str
     confidence: str = "medium"
+    relevance_score: float = 0.0
+    relevance_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,6 +142,7 @@ class TraderSourceConfig:
     max_queries: int
     max_results: int
     timeout_seconds: float
+    min_relevance_score: float = DEFAULT_MIN_RELEVANCE_SCORE
     google_search_api_key: str | None = None
     google_search_cx: str | None = None
     spanner_instance_id: str | None = None
@@ -183,6 +232,13 @@ def load_trader_source_config(env: Mapping[str, str] | None = None) -> TraderSou
         timeout_seconds=parse_float(
             env.get("TRADER_RAG_TIMEOUT_SECONDS"),
             parse_float_value(limits_cfg.get("timeout_seconds"), 6.0),
+        ),
+        min_relevance_score=parse_float(
+            env.get("TRADER_RAG_MIN_RELEVANCE_SCORE"),
+            parse_float_value(
+                limits_cfg.get("min_relevance_score"),
+                DEFAULT_MIN_RELEVANCE_SCORE,
+            ),
         ),
         google_search_api_key=value_from_env_or_yaml(
             env,
@@ -389,7 +445,10 @@ def run_multi_provider(
         for provider in providers
     ]
     evidence = dedupe_evidence(
-        [item for result in results for item in result.evidence]
+        filter_evidence_for_queries(
+            [item for result in results for item in result.evidence],
+            min_score=config.min_relevance_score,
+        )
     )[: config.max_results]
     warnings = [
         f"{result.provider}: {warning}"
@@ -544,6 +603,7 @@ def run_mcp_provider(
         )
     evidence: list[SearchEvidence] = []
     warnings: list[str] = []
+    errors: list[str] = []
     per_query_limit = max(1, min(config.max_results, 20))
     for query in queries[: config.max_queries]:
         try:
@@ -551,15 +611,19 @@ def run_mcp_provider(
                 fetch_mcp_search_records(query, config=config, limit=per_query_limit)
             )
         except Exception as exc:
-            warnings.append(
-                f"MCP search failed for `{query}`: {exception_summary(exc)}"
-            )
+            error = f"MCP search failed for `{query}`: {exception_summary(exc)}"
+            warnings.append(error)
+            errors.append(error)
             continue
         query_evidence = [
             normalize_mcp_record(record, query=query, index=index)
             for index, record in enumerate(records, start=1)
         ]
-        relevant_evidence = filter_evidence_by_query(query_evidence, query)
+        relevant_evidence = filter_evidence_by_query(
+            query_evidence,
+            query,
+            min_score=config.min_relevance_score,
+        )
         if query_evidence and not relevant_evidence:
             warnings.append(
                 f"MCP returned {len(query_evidence)} result(s) for `{query}`, but none matched material query terms."
@@ -570,7 +634,7 @@ def run_mcp_provider(
     deduped = dedupe_evidence(evidence)[: config.max_results]
     return TraderRagResult(
         provider=provider_name,
-        status="retrieved" if deduped else "provider_error" if warnings else "empty",
+        status="retrieved" if deduped else "provider_error" if errors else "empty",
         queries=queries,
         required_evidence=required_evidence,
         evidence=deduped,
@@ -581,16 +645,72 @@ def run_mcp_provider(
 def filter_evidence_by_query(
     evidence: list[SearchEvidence],
     query: str,
+    *,
+    min_score: float = DEFAULT_MIN_RELEVANCE_SCORE,
 ) -> list[SearchEvidence]:
-    return [item for item in evidence if search_evidence_matches_query(item, query)]
+    relevant: list[SearchEvidence] = []
+    for item in evidence:
+        score, reasons = evidence_relevance(item, query)
+        if score >= min_score:
+            relevant.append(
+                replace(
+                    item,
+                    relevance_score=round(score, 4),
+                    relevance_reasons=tuple(reasons),
+                )
+            )
+    return relevant
 
 
-def search_evidence_matches_query(item: SearchEvidence, query: str) -> bool:
+def filter_evidence_for_queries(
+    evidence: list[SearchEvidence],
+    *,
+    min_score: float = DEFAULT_MIN_RELEVANCE_SCORE,
+) -> list[SearchEvidence]:
+    return [
+        item
+        for query in sorted({item.query for item in evidence})
+        for item in filter_evidence_by_query(
+            [candidate for candidate in evidence if candidate.query == query],
+            query,
+            min_score=min_score,
+        )
+    ]
+
+
+def search_evidence_matches_query(
+    item: SearchEvidence,
+    query: str,
+    *,
+    min_score: float = DEFAULT_MIN_RELEVANCE_SCORE,
+) -> bool:
+    score, _reasons = evidence_relevance(item, query)
+    return score >= min_score
+
+
+def evidence_relevance(item: SearchEvidence, query: str) -> tuple[float, list[str]]:
     terms = evidence_relevance_terms(query)
     if not terms:
-        return True
-    haystack = f"{item.title} {item.summary}".lower()
-    return any(term in haystack for term in terms)
+        return 0.0, []
+    haystack = normalize_relevance_text(f"{item.title} {item.summary}")
+    title_haystack = normalize_relevance_text(item.title)
+    matched: list[str] = []
+    score = 0.0
+    for term in terms:
+        normalized_term = normalize_relevance_text(term)
+        if not normalized_term or normalized_term not in haystack:
+            continue
+        matched.append(term)
+        weight = evidence_term_weight(term)
+        if normalized_term in title_haystack:
+            weight += 0.25
+        score += weight
+    if not matched:
+        return 0.0, []
+    material_terms = [term for term in terms if evidence_term_weight(term) >= 1.5]
+    if material_terms and not any(term in matched for term in material_terms):
+        return 0.0, matched
+    return score, matched
 
 
 def evidence_relevance_terms(query: str) -> list[str]:
@@ -599,15 +719,33 @@ def evidence_relevance_terms(query: str) -> list[str]:
     terms: list[str] = []
     for value in [*phrases, *tokens]:
         normalized = " ".join(value.split()).strip(" .,:;")
+        normalized = normalize_relevance_text(normalized)
         if (
             not normalized
             or normalized in RELEVANCE_STOP_TERMS
             or normalized in {"and", "the", "for", "with"}
+            or (len(normalized) < 4 and normalized not in HIGH_VALUE_RELEVANCE_TERMS)
         ):
             continue
         if normalized not in terms:
             terms.append(normalized)
     return terms
+
+
+def evidence_term_weight(term: str) -> float:
+    normalized = normalize_relevance_text(term)
+    if normalized in HIGH_VALUE_RELEVANCE_TERMS:
+        return 2.0
+    if " " in normalized:
+        return 2.0
+    return 1.0
+
+
+def normalize_relevance_text(value: str) -> str:
+    lowered = str(value or "").lower()
+    lowered = lowered.replace("sulphur", "sulfur").replace("aluminium", "aluminum")
+    lowered = re.sub(r"[^a-z0-9]+", " ", lowered)
+    return " ".join(lowered.split())
 
 
 def run_async_mcp(coro: Any) -> Any:
@@ -879,6 +1017,7 @@ def run_spanner_provider(
         )
     evidence: list[SearchEvidence] = []
     warnings: list[str] = []
+    errors: list[str] = []
     per_query_limit = max(1, min(config.max_results, 10))
     for query in queries[: config.max_queries]:
         try:
@@ -891,15 +1030,17 @@ def run_spanner_provider(
             if query_evidence:
                 break
         except Exception as exc:
-            warnings.append(f"Spanner RAG failed for `{query}`: {exc}")
+            error = f"Spanner RAG failed for `{query}`: {exc}"
+            warnings.append(error)
+            errors.append(error)
     deduped = dedupe_evidence(evidence)[: config.max_results]
     if not deduped and not warnings:
         warnings.append(
-            f"Private corpus target {resource} returned no eligible market/news chunks after excluding console user-talk memory."
+            f"Private corpus target {resource} returned no relevant market/news chunks after relevance filtering and excluding console discussion memory."
         )
     return TraderRagResult(
         provider="spanner_rag",
-        status="retrieved" if deduped else "provider_error" if warnings else "empty",
+        status="retrieved" if deduped else "provider_error" if errors else "empty",
         queries=queries,
         required_evidence=required_evidence,
         evidence=deduped,
@@ -957,7 +1098,13 @@ def spanner_rows_to_evidence(
     for row in rows:
         if spanner_row_is_self_memory(row):
             continue
-        evidence.append(spanner_row_to_evidence(row, query=query, config=config))
+        candidate = spanner_row_to_evidence(row, query=query, config=config)
+        relevant = filter_evidence_by_query(
+            [candidate],
+            query,
+            min_score=config.min_relevance_score,
+        )
+        evidence.extend(relevant)
         if len(evidence) >= limit:
             break
     return evidence
@@ -1151,10 +1298,16 @@ def run_fixture_provider(
             warnings=["TRADER_RAG_FIXTURE_PATH is required for fixture RAG."],
         )
     raw = json.loads(Path(path).read_text())
-    evidence = [
+    candidates = [
         normalize_result(item, query=str(item.get("query") or queries[0]), source="fixture")
         for item in raw.get("results", raw if isinstance(raw, list) else [])
     ]
+    evidence = dedupe_evidence(
+        filter_evidence_for_queries(
+            candidates,
+            min_score=config.min_relevance_score,
+        )
+    )[: config.max_results]
     return TraderRagResult(
         provider="fixture",
         status="retrieved" if evidence else "empty",
@@ -1204,7 +1357,12 @@ def run_google_cse_provider(
             continue
         for item in payload.get("items", []):
             evidence.append(normalize_result(item, query=query, source="google_cse"))
-    deduped = dedupe_evidence(evidence)[:max_results]
+    deduped = dedupe_evidence(
+        filter_evidence_for_queries(
+            evidence,
+            min_score=config.min_relevance_score,
+        )
+    )[:max_results]
     return TraderRagResult(
         provider="google_cse",
         status="retrieved" if deduped else "empty",

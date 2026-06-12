@@ -9,6 +9,9 @@ limits:
   max_queries: 3
   max_results: 5
   timeout_seconds: 6
+  # Conservative lexical gate before evidence is allowed into the decision frame.
+  # Raise this if search providers return broad market/news noise.
+  min_relevance_score: 2.0
 
 google_agent_search:
   # ADK workflow path. Uses google.adk.tools.google_search_tool.google_search.

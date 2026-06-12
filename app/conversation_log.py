@@ -74,6 +74,49 @@ def persist_console_talk(
     return local_uri
 
 
+def persist_human_review_talk(
+    *,
+    ledger: Any,
+    action: str,
+    note: str,
+    operator: str,
+    message: str,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    env = env or dict(os.environ)
+    if not env_flag(env.get("USER_TALKS_RAG_LOG_ENABLED"), default=True):
+        return None
+    created_at = datetime.now(UTC).isoformat()
+    record = {
+        "schema_version": 1,
+        "kind": "mutual_spec_human_review",
+        "created_at": created_at,
+        "ledger_id": ledger.ledger_id,
+        "review_id": ledger.human_review.review_id,
+        "operator": operator,
+        "review_action": action,
+        "operator_note": note,
+        "review_message": message,
+        "expressed_query": ledger.expressed_query or ledger.user_request,
+        "goal": ledger.goal,
+        "audience": ledger.audience,
+        "output_format": ledger.output_format,
+        "decision_gate": ledger.decision_gate,
+        "status": ledger.status,
+        "human_review": ledger.human_review.model_dump(mode="json"),
+        "proof_obligations": [
+            item.model_dump(mode="json") for item in ledger.proof_obligations
+        ],
+        "verification_findings": [
+            item.model_dump(mode="json") for item in ledger.verification_findings
+        ],
+        "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
+    }
+    local_uri = write_local_record(record, env)
+    maybe_upload_record(record, created_at, ledger.ledger_id, env)
+    return local_uri
+
+
 def write_local_record(record: dict[str, Any], env: dict[str, str]) -> str:
     out_dir = Path(env.get("USER_TALKS_LOCAL_DIR", "app/.adk/user_talks"))
     out_dir.mkdir(parents=True, exist_ok=True)

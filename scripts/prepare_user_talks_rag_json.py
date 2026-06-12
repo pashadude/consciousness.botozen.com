@@ -126,13 +126,16 @@ def title_from_markdown(body: str) -> str:
 
 def talk_record_document(*, source_path: Path, source_row: int) -> dict[str, Any]:
     record = json.loads(source_path.read_text(encoding="utf-8"))
+    kind = text_value(record.get("kind")) or "mutual_spec_user_talk"
     ledger_id = text_value(record.get("ledger_id")) or source_path.stem
     expressed_query = text_value(record.get("expressed_query") or record.get("raw_text"))
-    title = expressed_query[:180] if expressed_query else f"User talk {ledger_id}"
+    title_prefix = "Human review" if kind == "mutual_spec_human_review" else "User talk"
+    title = expressed_query[:180] if expressed_query else f"{title_prefix} {ledger_id}"
     body = render_talk_record(record)
     tags = sorted(
         {
             "conversation_trace",
+            "human_review" if kind == "mutual_spec_human_review" else "",
             "mutual_specification_game",
             "proof_carrying_response",
             "specification_ledger",
@@ -177,12 +180,16 @@ def talk_record_document(*, source_path: Path, source_row: int) -> dict[str, Any
         "body": body,
         "text_for_embedding": text_for_embedding,
         "published_at": published_at,
-        "source": "console_user_talk_log",
+        "source": (
+            "console_human_review_log"
+            if kind == "mutual_spec_human_review"
+            else "console_user_talk_log"
+        ),
         "commodities": commodities,
         "tags": tags,
         "sentiment": None,
         "metadata": {
-            "kind": "mutual_spec_user_talk",
+            "kind": kind,
             "ledger_id": ledger_id,
             "source_path": source_path.as_posix(),
             "response_channel": record.get("response_channel"),
@@ -195,8 +202,13 @@ def talk_record_document(*, source_path: Path, source_row: int) -> dict[str, Any
 
 def render_talk_record(record: Mapping[str, Any]) -> str:
     sections = [
+        ("Kind", record.get("kind")),
         ("User query", record.get("expressed_query") or record.get("raw_text")),
         ("Speech text", record.get("speech_text")),
+        ("Operator", record.get("operator")),
+        ("Review action", record.get("review_action")),
+        ("Operator note", record.get("operator_note")),
+        ("Review message", record.get("review_message")),
         ("Goal", record.get("goal")),
         ("Audience", record.get("audience")),
         ("Output format", record.get("output_format")),
@@ -229,7 +241,7 @@ def render_talk_record(record: Mapping[str, Any]) -> str:
     parts = [
         f"Created at: {text_value(record.get('created_at'))}",
         f"Ledger ID: {text_value(record.get('ledger_id'))}",
-        "Kind: mutual_spec_user_talk",
+        f"Kind: {text_value(record.get('kind')) or 'mutual_spec_user_talk'}",
     ]
     for label, value in sections:
         rendered = render_value(value)

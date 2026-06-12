@@ -21,7 +21,7 @@ from app.cli_dashboard import (
     estimate_spend,
     google_status,
 )
-from app.conversation_log import persist_console_talk
+from app.conversation_log import persist_console_talk, persist_human_review_talk
 from app.formalization import formalize_ledger
 from app.jobs import enqueue_async_job
 from app.router import (
@@ -186,6 +186,13 @@ async def human_review_json(
     message = apply_operator_review(ledger, action=action, note=note, operator=operator)
     update_mutual_spec_game_state(ledger)
     append_human_review_log(ledger, action=action, note=note, operator=operator, message=message)
+    persist_human_review_talk(
+        ledger=ledger,
+        action=action,
+        note=note,
+        operator=operator,
+        message=message,
+    )
     return JSONResponse(
         {
             "ledger": ledger.model_dump(mode="json"),
