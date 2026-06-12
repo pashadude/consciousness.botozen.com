@@ -580,6 +580,17 @@ def default_opoint_mcp_command() -> str:
     return f"{shlex.quote(sys.executable)} -m opoint_mcp.server"
 
 
+def mcp_stdio_env(config: TraderSourceConfig) -> dict[str, str]:
+    env = dict(os.environ)
+    if config.opoint_api_key:
+        env["OPOINT_API_KEY"] = config.opoint_api_key
+    if config.google_cloud_project:
+        env["GOOGLE_CLOUD_PROJECT"] = config.google_cloud_project
+    if config.google_cloud_location:
+        env["GOOGLE_CLOUD_LOCATION"] = config.google_cloud_location
+    return env
+
+
 def exception_summary(exc: BaseException) -> str:
     if isinstance(exc, BaseExceptionGroup):
         parts = [exception_summary(item) for item in exc.exceptions]
@@ -621,6 +632,7 @@ async def fetch_mcp_search_records(
     server_params = StdioServerParameters(
         command=parts[0],
         args=parts[1:],
+        env=mcp_stdio_env(config),
         cwd=config.mcp_research_cwd,
     )
     async with stdio_client(server_params) as (read_stream, write_stream):

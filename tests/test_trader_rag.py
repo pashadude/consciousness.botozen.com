@@ -10,6 +10,7 @@ from app.trader_rag import (
     exception_summary,
     load_trader_source_config,
     mcp_search_arguments,
+    mcp_stdio_env,
     records_from_mcp_payload,
     run_async_mcp,
     run_trader_rag,
@@ -295,6 +296,27 @@ def test_exception_summary_expands_exception_group() -> None:
     )
 
     assert summary == "RuntimeError: child import failed"
+
+
+def test_mcp_stdio_env_passes_opoint_key_to_child_process(monkeypatch) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin")
+    config = TraderSourceConfig(
+        provider="mcp",
+        google_agent_search_enabled=False,
+        max_queries=3,
+        max_results=5,
+        timeout_seconds=6,
+        google_cloud_project="zenpulsar",
+        google_cloud_location="us-central1",
+        opoint_api_key="secret-key",
+    )
+
+    env = mcp_stdio_env(config)
+
+    assert env["OPOINT_API_KEY"] == "secret-key"
+    assert env["GOOGLE_CLOUD_PROJECT"] == "zenpulsar"
+    assert env["GOOGLE_CLOUD_LOCATION"] == "us-central1"
+    assert env["PATH"] == "/usr/bin"
 
 
 def test_joined_spanner_and_mcp_provider_merges_evidence(monkeypatch) -> None:
