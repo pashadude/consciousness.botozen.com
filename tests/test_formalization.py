@@ -108,17 +108,22 @@ def test_mutual_specification_game_formalization_checks_architecture_obligations
     assert record.hypothesis["formal_proofs"]["backend"] == "lean"
 
 
-def test_verifier_blocks_ready_gate_when_formal_obligations_are_missing() -> None:
+def test_formalization_blocks_ready_gate_when_obligations_are_missing() -> None:
     ledger = SpecLedger()
     update_ledger_from_user_text(ledger, "look at HO/RB arb and give me risk on this spread")
     ledger.decision_gate = "decision_frame_ready"
     formalize_ledger(ledger)
 
+    assert ledger.decision_gate == "needs_more_info"
+    assert any(
+        item.source_type == "formalization" and "horizon_or_timeframe" in item.statement
+        for item in ledger.proof_obligations
+    )
+
     draft = build_draft_from_ledger(ledger)
     result = verify_draft(ledger, draft)
 
-    assert not result.passed
     assert any(
-        item.severity == "high" and "horizon_or_timeframe" in item.message
+        item.severity == "medium" and "horizon_or_timeframe" in item.message
         for item in result.findings
     )

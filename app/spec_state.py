@@ -513,6 +513,11 @@ def update_mutual_spec_game_state(ledger: SpecLedger) -> SpecLedger:
     sync_human_review_state(ledger)
     sync_skill_compatibility_state(ledger)
     sync_proof_obligations(ledger)
+    sync_decision_gate_state(ledger)
+    sync_claim_graph(ledger)
+    sync_human_review_state(ledger)
+    sync_skill_compatibility_state(ledger)
+    sync_proof_obligations(ledger)
     sync_equilibrium_diagnostics(ledger)
     sync_formal_proof_checks(ledger)
     ledger.game_states = build_game_states(ledger)
@@ -1131,6 +1136,29 @@ def sync_proof_obligations(ledger: SpecLedger) -> None:
             )
         )
     ledger.proof_obligations = dedupe_proof_obligations(obligations)[-MAX_TRACE_STEPS:]
+
+
+def sync_decision_gate_state(ledger: SpecLedger) -> None:
+    unsatisfied_evidence = any(
+        item.required and item.status != "satisfied" for item in ledger.search_plan
+    )
+    review_required = ledger.human_review.required and ledger.human_review.status != "approved"
+    open_proofs = any(
+        item.required and item.status not in {"satisfied", "waived"}
+        for item in ledger.proof_obligations
+    )
+    high_findings = any(item.severity == "high" for item in ledger.verification_findings)
+    material_artifact_open = any(
+        item.source_type == "artifact" and item.status not in {"satisfied", "waived"}
+        for item in ledger.proof_obligations
+    )
+
+    if high_findings:
+        ledger.decision_gate = "blocked"
+    elif ledger.ambiguities or unsatisfied_evidence or review_required or open_proofs or material_artifact_open:
+        ledger.decision_gate = "needs_more_info"
+    else:
+        ledger.decision_gate = "ready"
 
 
 def dedupe_proof_obligations(

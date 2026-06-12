@@ -1053,6 +1053,7 @@ def build_generic_answer_lines(result: ConsoleResult) -> list[str]:
             f"audience={ledger.audience or 'unresolved'}, "
             f"format={ledger.output_format or 'unresolved'}."
         ),
+        *build_working_response_lines(ledger),
         (
             f"Source layer: {source_status} with {source_count} cited item(s); "
             + (
@@ -1071,6 +1072,46 @@ def build_generic_answer_lines(result: ConsoleResult) -> list[str]:
     if next_line:
         lines.append(next_line)
     return lines
+
+
+def build_working_response_lines(ledger: SpecLedger) -> list[str]:
+    goal = ledger.goal or ledger.expressed_query or ledger.user_request or "the submitted task"
+    output_format = (ledger.output_format or "").lower()
+    if "checklist" in output_format:
+        return [
+            (
+                "Working checklist: "
+                "1. Confirm launch owner, scope, audience, and deadline; "
+                "2. Verify core dashboard data sources, freshness, permissions, and fallback states; "
+                "3. Test primary user flows on desktop and mobile; "
+                "4. Check authentication, authorization, secrets, and error handling; "
+                "5. Validate charts, tables, empty states, loading states, and accessibility; "
+                "6. Confirm observability, alerts, rollback plan, and post-launch owner; "
+                "7. Get final signoff against the accepted success criteria."
+            )
+        ]
+    if "table" in output_format:
+        return [
+            (
+                "Working table columns: item, owner, current state, evidence/source, blocker, "
+                "next action, due date, and acceptance check."
+            )
+        ]
+    if output_format in {"json", "csv"}:
+        return [
+            (
+                f"Working {ledger.output_format} shape: "
+                "task, inferred_intent, assumptions, evidence_needed, answer, next_action, status."
+            )
+        ]
+    if "code" in output_format or "python" in output_format:
+        return [
+            (
+                "Working answer: code generation needs the target file, runtime, expected behavior, "
+                "and verification command; without those, treat this as a spec frame before editing."
+            )
+        ]
+    return [f"Working answer: {goal}"]
 
 
 def next_action_line(ledger: SpecLedger, recommendation: str) -> str:
