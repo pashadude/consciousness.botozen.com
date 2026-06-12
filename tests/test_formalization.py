@@ -127,3 +127,24 @@ def test_formalization_blocks_ready_gate_when_obligations_are_missing() -> None:
         item.severity == "medium" and "horizon_or_timeframe" in item.message
         for item in result.findings
     )
+
+
+def test_formalization_gap_does_not_queue_human_review_for_non_execution_research() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        (
+            "Thailand's Department of Agricultural Extension advises farmers to follow "
+            "mulching, water management, and proper fertilizer use for dry spell risk "
+            "affecting sugarcane."
+        ),
+    )
+
+    record = formalize_ledger(ledger)
+
+    assert record.task_name == "trader_decision_frame"
+    assert {"instrument_mapping", "horizon_or_timeframe"}.issubset(record.missing_obligations)
+    assert ledger.decision_gate == "needs_more_info"
+    assert ledger.human_review.required is False
+    assert ledger.human_review.status == "not_required"
+    assert ledger.equilibrium_diagnostics.recommended_action == "ask"

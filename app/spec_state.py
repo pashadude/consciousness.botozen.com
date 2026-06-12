@@ -945,7 +945,7 @@ def sync_human_review_state(ledger: SpecLedger) -> None:
     if high_findings:
         reasons.append("High-severity verifier findings block approval.")
         required_actions.extend(f"Resolve verifier finding: {item.message}" for item in high_findings[:6])
-    if formal_missing:
+    if formal_missing and high_stakes:
         reasons.append("Formalization obligations are incomplete.")
         required_actions.append("Resolve missing formal obligation(s): " + ", ".join(formal_missing[:8]))
     if unsatisfied_search and high_stakes:
@@ -967,13 +967,15 @@ def sync_human_review_state(ledger: SpecLedger) -> None:
         risk_level = "critical"
     elif high_stakes:
         risk_level = "high"
-    elif formal_missing or unsatisfied_search or blocking_claims or artifact_blocks:
-        risk_level = "medium"
     else:
         risk_level = "low"
 
     approval_still_valid = previous.status == "approved" and not (
-        high_findings or formal_missing or unsatisfied_search or blocking_claims or artifact_blocks
+        high_findings
+        or (
+            high_stakes
+            and (formal_missing or unsatisfied_search or blocking_claims or artifact_blocks)
+        )
     )
     if not required:
         status = "not_required"
@@ -1183,27 +1185,33 @@ def sync_equilibrium_diagnostics(ledger: SpecLedger) -> None:
         item.required and item.status not in {"satisfied", "waived"}
         for item in ledger.proof_obligations
     )
+    open_formal_proofs = any(
+        item.required
+        and item.source_type == "formalization"
+        and item.status not in {"satisfied", "waived"}
+        for item in ledger.proof_obligations
+    )
     high_findings = any(item.severity == "high" for item in ledger.verification_findings)
     gate_blocked = ledger.decision_gate == "needs_more_info"
 
     payoffs = [
         GameActionPayoff(
             action="ask",
-            specification_gain=0.85 if missing_material else 0.25,
-            risk_reduction=0.45 if missing_material else 0.15,
+            specification_gain=0.85 if missing_material or open_formal_proofs else 0.25,
+            risk_reduction=0.45 if missing_material or open_formal_proofs else 0.15,
             user_burden=0.65,
             latency_cost=0.10,
             policy_penalty=0.0,
-            rationale="Best when material fields are missing; otherwise adds user burden.",
+            rationale="Best when material fields or formal specification obligations are missing; otherwise adds user burden.",
         ),
         GameActionPayoff(
             action="retrieve",
-            specification_gain=0.85 if unsatisfied_evidence or open_proofs else 0.25,
-            risk_reduction=0.70 if unsatisfied_evidence or open_proofs else 0.20,
+            specification_gain=0.85 if unsatisfied_evidence or (open_proofs and not open_formal_proofs) else 0.25,
+            risk_reduction=0.70 if unsatisfied_evidence or (open_proofs and not open_formal_proofs) else 0.20,
             user_burden=0.20,
             latency_cost=0.55,
             policy_penalty=0.0,
-            rationale="Best when external evidence or proof obligations are open.",
+            rationale="Best when external evidence or non-formal proof obligations are open.",
         ),
         GameActionPayoff(
             action="review",
@@ -1247,6 +1255,7 @@ def sync_equilibrium_diagnostics(ledger: SpecLedger) -> None:
     conflicts = equilibrium_conflicts(
         gate_blocked=gate_blocked,
         open_proofs=open_proofs,
+        open_formal_proofs=open_formal_proofs,
         review_required=review_required,
         high_findings=high_findings,
         unsatisfied_evidence=unsatisfied_evidence,
@@ -1255,6 +1264,7 @@ def sync_equilibrium_diagnostics(ledger: SpecLedger) -> None:
         missing_material=missing_material,
         unsatisfied_evidence=unsatisfied_evidence,
         review_required=review_required,
+        open_formal_proofs=open_formal_proofs,
         open_proofs=open_proofs,
         high_findings=high_findings,
         gate_blocked=gate_blocked,
@@ -1516,6 +1526,7 @@ def recommended_equilibrium_action(
     missing_material: bool,
     unsatisfied_evidence: bool,
     review_required: bool,
+    open_formal_proofs: bool,
     open_proofs: bool,
     high_findings: bool,
     gate_blocked: bool,
@@ -1524,10 +1535,10 @@ def recommended_equilibrium_action(
         return "defer"
     if review_required:
         return "review"
+    if missing_material or open_formal_proofs or gate_blocked:
+        return "ask"
     if unsatisfied_evidence or open_proofs:
         return "retrieve"
-    if missing_material or gate_blocked:
-        return "ask"
     return "finalize"
 
 
@@ -1535,6 +1546,7 @@ def equilibrium_conflicts(
     *,
     gate_blocked: bool,
     open_proofs: bool,
+    open_formal_proofs: bool,
     review_required: bool,
     high_findings: bool,
     unsatisfied_evidence: bool,
@@ -1544,6 +1556,8 @@ def equilibrium_conflicts(
         conflicts.append("Finalize conflicts with decision_gate=needs_more_info.")
     if open_proofs:
         conflicts.append("Finalize/propose conflicts with open proof obligations.")
+    if open_formal_proofs:
+        conflicts.append("Formal specification obligations must be clarified before a decision-ready response.")
     if review_required:
         conflicts.append("Finalize conflicts with required human review approval.")
     if high_findings:
@@ -1564,6 +1578,8 @@ def sync_skill_compatibility_state(ledger: SpecLedger) -> None:
     risks: list[str] = []
     evidence_required: list[str] = []
     learned_from = ["current_query"]
+    latest_formal = ledger.formalization_records[-1] if ledger.formalization_records else None
+    formal_missing = latest_formal.missing_obligations if latest_formal and latest_formal.is_valid != 1 else []
 
     if is_mutual_spec_architecture_text(text):
         inferred_role = "technical product builder"
@@ -1610,6 +1626,8 @@ def sync_skill_compatibility_state(ledger: SpecLedger) -> None:
 
     if ledger.human_review.required:
         next_action = "review"
+    elif formal_missing:
+        next_action = "ask"
     elif any(item.status != "satisfied" for item in ledger.search_plan if item.required):
         next_action = "retrieve"
     elif ledger.ambiguities:

@@ -1117,6 +1117,9 @@ def build_working_response_lines(ledger: SpecLedger) -> list[str]:
 def next_action_line(ledger: SpecLedger, recommendation: str) -> str:
     if ledger.human_review.required and ledger.human_review.required_actions:
         return "Next action: " + ledger.human_review.required_actions[0]
+    formal_missing = latest_missing_formal_obligations(ledger)
+    if recommendation == "ask" and formal_missing:
+        return "Next action: clarify these formal spec fields: " + ", ".join(formal_missing[:6]) + "."
     if recommendation == "ask" and ledger.ambiguities:
         fields = ", ".join(item.field for item in ledger.ambiguities[:6])
         return f"Next action: clarify these fields: {fields}."
@@ -1130,6 +1133,13 @@ def next_action_line(ledger: SpecLedger, recommendation: str) -> str:
     if recommendation == "propose":
         return "Next action: propose the working spec and ask the user to endorse or correct it."
     return ""
+
+
+def latest_missing_formal_obligations(ledger: SpecLedger) -> list[str]:
+    latest_formal = ledger.formalization_records[-1] if ledger.formalization_records else None
+    if not latest_formal or latest_formal.is_valid == 1:
+        return []
+    return latest_formal.missing_obligations
 
 
 def render_list(items: list[str]) -> str:
