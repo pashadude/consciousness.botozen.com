@@ -1158,7 +1158,7 @@ def sync_decision_gate_state(ledger: SpecLedger) -> None:
     elif ledger.ambiguities or unsatisfied_evidence or review_required or open_proofs or material_artifact_open:
         ledger.decision_gate = "needs_more_info"
     else:
-        ledger.decision_gate = "ready"
+        ledger.decision_gate = "analysis_ready"
 
 
 def dedupe_proof_obligations(

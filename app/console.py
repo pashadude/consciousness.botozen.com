@@ -1220,6 +1220,9 @@ def proof_status_class(status: str) -> str:
 def gate_status_class(status: str) -> str:
     return {
         "ready": "verified",
+        "analysis_ready": "verified",
+        "alert_ready": "verified",
+        "decision_frame_ready": "verified",
         "go": "verified",
         "finalized": "verified",
         "needs_more_info": "blocked",

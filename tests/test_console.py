@@ -98,7 +98,7 @@ def test_console_generic_query_returns_answer_frame(tmp_path, monkeypatch) -> No
     assert any("Working checklist:" in item for item in payload["provisional_answer"])
     assert any("Source layer:" in item for item in payload["provisional_answer"])
     assert payload["ledger"]["expressed_query"] == "Draft a launch checklist for the new dashboard"
-    assert payload["ledger"]["decision_gate"] == "ready"
+    assert payload["ledger"]["decision_gate"] == "analysis_ready"
 
 
 def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:
