@@ -114,7 +114,8 @@ def route_async_decision(
             expected_spec_gain="medium",
         )
 
-    if failed_verification or any(item.severity == "high" for item in ledger.verification_findings):
+    has_high_severity_finding = any(item.severity == "high" for item in ledger.verification_findings)
+    if failed_verification or has_high_severity_finding:
         reasons.append("verifier_failed")
         risk_score += 3
 
@@ -130,11 +131,25 @@ def route_async_decision(
         reasons.append("trader_research_evidence_open")
         risk_score += 1
 
-    if mcp_configured:
+    latest_formalization = ledger.formalization_records[-1] if ledger.formalization_records else None
+    formal_obligations_missing = bool(latest_formalization and latest_formalization.is_valid != 1)
+    deep_tool_work_needed = any(
+        (
+            failed_verification,
+            has_high_severity_finding,
+            required_search_open,
+            review_required,
+            execution_sensitive,
+            formal_obligations_missing,
+            artifact_count > 0,
+        )
+    )
+
+    if mcp_configured and deep_tool_work_needed:
         reasons.append("external_mcp_research_available")
         risk_score += 1
 
-    if telemetry_enabled:
+    if telemetry_enabled and deep_tool_work_needed:
         reasons.append("resource_region_telemetry_available")
         risk_score += 1
 
@@ -142,8 +157,7 @@ def route_async_decision(
         reasons.append("artifact_retrieval_or_embedding_needed")
         risk_score += 1
 
-    latest_formalization = ledger.formalization_records[-1] if ledger.formalization_records else None
-    if latest_formalization and latest_formalization.is_valid != 1:
+    if formal_obligations_missing:
         reasons.append("formal_obligations_missing")
         risk_score += 1
 

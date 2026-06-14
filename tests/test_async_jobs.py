@@ -36,12 +36,13 @@ def test_async_route_decision_keeps_supplied_marks_analysis_sync() -> None:
 
     decision = route_async_decision(
         ledger,
-        mcp_configured=False,
-        telemetry_enabled=False,
+        mcp_configured=True,
+        telemetry_enabled=True,
     )
 
     assert decision.mode == "sync"
     assert decision.job_kind == "sync_spec_response"
+    assert decision.reasons == ("low_risk_sync_path",)
 
 
 def test_async_route_decision_keeps_material_clarification_sync() -> None:
