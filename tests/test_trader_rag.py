@@ -10,6 +10,7 @@ from app.trader_rag import (
     default_opoint_mcp_command,
     evidence_relevance,
     exception_summary,
+    execute_spanner_search,
     filter_evidence_by_query,
     filter_evidence_for_queries,
     load_trader_source_config,
@@ -27,6 +28,38 @@ SULFUR_OFFER = (
     "Look i have an offer of 50000 tonns of sulfur in Iraq, "
     "Umm Qasr, fob 550, should i go for it?"
 )
+
+
+class FakeParamTypes:
+    STRING = "STRING"
+    INT64 = "INT64"
+
+
+class FakeSnapshot:
+    def __init__(self, database):
+        self.database = database
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def execute_sql(self, sql, params, param_types):
+        self.database.sql = sql
+        self.database.params = params
+        self.database.param_types = param_types
+        return []
+
+
+class FakeDatabase:
+    def __init__(self):
+        self.sql = ""
+        self.params = {}
+        self.param_types = {}
+
+    def snapshot(self):
+        return FakeSnapshot(self)
 
 
 def test_disabled_trader_rag_keeps_search_plan_without_evidence() -> None:
@@ -125,6 +158,76 @@ def test_spanner_scan_terms_preserve_phrases_and_drop_generic_terms() -> None:
     assert "task" not in terms
 
 
+def test_spanner_rag_search_mode_can_be_configured_from_env() -> None:
+    config = load_trader_source_config(
+        {
+            "TRADER_RAG_PROVIDER": "spanner_rag",
+            "GOOGLE_CLOUD_PROJECT": "zenpulsar",
+            "SPANNER_RAG_INSTANCE_ID": "commodity-rag",
+            "SPANNER_RAG_DATABASE_ID": "trader_rag",
+            "SPANNER_RAG_SEARCH_MODE": "vector",
+        }
+    )
+
+    assert config.spanner_search_mode == "vector"
+
+
+def test_spanner_semantic_mode_uses_full_text_search_sql() -> None:
+    database = FakeDatabase()
+
+    execute_spanner_search(
+        database=database,
+        table="RagChunks",
+        model="RagEmbeddingModel",
+        query="sulfur Umm Qasr",
+        limit=5,
+        param_types=FakeParamTypes,
+        mode="semantic",
+    )
+
+    assert "SEARCH(ChunkTokens, @query)" in database.sql
+    assert "ML.PREDICT" not in database.sql
+    assert "APPROX_COSINE_DISTANCE" not in database.sql
+
+
+def test_spanner_vector_mode_uses_embedding_distance_sql() -> None:
+    database = FakeDatabase()
+
+    execute_spanner_search(
+        database=database,
+        table="RagChunks",
+        model="RagEmbeddingModel",
+        query="sulfur Umm Qasr",
+        limit=5,
+        param_types=FakeParamTypes,
+        mode="vector",
+    )
+
+    assert "ML.PREDICT" in database.sql
+    assert "RETRIEVAL_QUERY" in database.sql
+    assert "APPROX_COSINE_DISTANCE" in database.sql
+    assert "SEARCH(ChunkTokens, @query)" not in database.sql
+
+
+def test_spanner_hybrid_mode_uses_text_and_vector_rrf_sql() -> None:
+    database = FakeDatabase()
+
+    execute_spanner_search(
+        database=database,
+        table="RagChunks",
+        model="RagEmbeddingModel",
+        query="sulfur Umm Qasr",
+        limit=5,
+        param_types=FakeParamTypes,
+        mode="hybrid",
+    )
+
+    assert "ML.PREDICT" in database.sql
+    assert "APPROX_COSINE_DISTANCE" in database.sql
+    assert "SEARCH(ChunkTokens, @query)" in database.sql
+    assert "rrf_score" in database.sql
+
+
 def test_spanner_rag_excludes_console_user_talk_memory_from_evidence() -> None:
     config = TraderSourceConfig(
         provider="spanner_rag",
@@ -214,6 +317,61 @@ def test_spanner_rag_filters_irrelevant_private_chunks() -> None:
     assert [item.title for item in evidence] == ["Iraq sulfur export checks"]
     assert evidence[0].relevance_score >= 2.0
     assert "sulfur" in evidence[0].relevance_reasons
+
+
+def test_spanner_rag_filters_irrelevant_chunks_for_ho_rb_spread() -> None:
+    config = TraderSourceConfig(
+        provider="spanner_rag",
+        google_agent_search_enabled=False,
+        max_queries=3,
+        max_results=5,
+        timeout_seconds=6,
+        google_cloud_project="zenpulsar",
+        spanner_instance_id="commodity-rag",
+        spanner_database_id="trader_rag",
+        spanner_chunks_table="RagChunks",
+    )
+    self_memory_row = (
+        "talk-chunk",
+        "talk-doc",
+        "mutual_spec_user_talks",
+        "Title: Look at HO/RB arb and give me risk on this spread.",
+        "2026-06-11T00:00:00Z",
+        "console_user_talk_log",
+        ["human_ai_coordination", "sulfur", "trader_workflow"],
+        ["conversation_trace", "mutual_specification_game", "trader_agent"],
+    )
+    sulfur_row = (
+        "sulfur-chunk",
+        "sulfur-doc",
+        "commodity_articles",
+        "Title: Iraq sulfur export checks\nSulfur cargoes and Umm Qasr loading inspections remain active.",
+        "2026-06-10T00:00:00Z",
+        "commodity_news",
+        ["sulfur"],
+        ["logistics", "inspection"],
+    )
+    spread_row = (
+        "spread-chunk",
+        "spread-doc",
+        "commodity_articles",
+        "Title: Heating oil RBOB spread risk\nRBOB gasoline and heating oil cracks moved on inventory data.",
+        "2026-06-10T00:00:00Z",
+        "commodity_news",
+        ["heating_oil", "rbob", "gasoline"],
+        ["spread", "inventory"],
+    )
+
+    evidence = spanner_rows_to_evidence(
+        [self_memory_row, sulfur_row, spread_row],
+        query='"HO/RB" "Heating Oil" RBOB spread price',
+        config=config,
+        limit=5,
+    )
+
+    assert [item.title for item in evidence] == ["Heating oil RBOB spread risk"]
+    assert "console_user_talk_log" not in evidence[0].summary
+    assert {"heating oil", "rbob"}.issubset(set(evidence[0].relevance_reasons))
 
 
 def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:

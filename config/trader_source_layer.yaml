@@ -37,6 +37,10 @@ spanner_rag:
   documents_table: RagDocuments
   chunks_table: RagChunks
   embedding_model: RagEmbeddingModel
+  # semantic = Spanner full-text SEARCH only
+  # vector = Gemini embedding ANN only
+  # hybrid = reciprocal-rank fusion over semantic + vector candidates
+  search_mode: hybrid
   corpus_hint: commodity_articles_spanner
 
 vertex_ai_search:

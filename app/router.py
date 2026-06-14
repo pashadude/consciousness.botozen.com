@@ -118,9 +118,17 @@ def route_async_decision(
         reasons.append("verifier_failed")
         risk_score += 3
 
-    if looks_like_trader_query(query):
+    required_search_open = any(
+        item.required and item.status != "satisfied" for item in ledger.search_plan
+    )
+    review_required = ledger.human_review.required and ledger.human_review.status != "approved"
+    execution_sensitive = is_execution_sensitive_trader_query(query)
+    if looks_like_trader_query(query) and (review_required or execution_sensitive):
         reasons.append("high_stakes_trader_decision_frame")
         risk_score += 2
+    elif looks_like_trader_query(query) and required_search_open:
+        reasons.append("trader_research_evidence_open")
+        risk_score += 1
 
     if mcp_configured:
         reasons.append("external_mcp_research_available")
@@ -139,7 +147,7 @@ def route_async_decision(
         reasons.append("formal_obligations_missing")
         risk_score += 1
 
-    if any(token in query.lower() for token in ("risk", "legal", "sanction", "counterparty", "route", "position", "execute")):
+    if any(token in query.lower() for token in ("legal", "sanction", "counterparty", "route", "position", "execute")):
         reasons.append("risk_or_policy_sensitive_prompt")
         risk_score += 1
 
@@ -167,6 +175,30 @@ def async_jobs_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+def is_execution_sensitive_trader_query(text: str) -> bool:
+    lower = text.lower()
+    return any(
+        token in lower
+        for token in (
+            "should i",
+            "go for it",
+            "accept",
+            "buy",
+            "sell",
+            "execute",
+            "order",
+            "position",
+            "size",
+            "cargo",
+            "counterparty",
+            "sanction",
+            "fob",
+            "cfr",
+            "cif",
+        )
+    )
 
 
 def safety_risk_score(text: str) -> int:

@@ -103,6 +103,33 @@ def test_console_generic_query_returns_answer_frame(tmp_path, monkeypatch) -> No
     assert payload["ledger"]["decision_gate"] == "analysis_ready"
 
 
+def test_console_ho_rb_marks_produce_calculated_analysis_frame(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setenv("TRADER_RAG_PROVIDER", "disabled")
+    monkeypatch.setenv("ASYNC_JOB_ENABLED", "true")
+    client = TestClient(app)
+
+    query = (
+        "look at HO/RB arb and give me risk on this spread, today Heating Oil "
+        "(HO) and RBOB Gasoline (RB) sits at roughly $3.40 per gallon for "
+        "Heating Oil and $3.05 per gallon for RBOB Gasoline, while Brent Crude "
+        "is $87.33 per barrel, and WTI is trading at $84.88 per barrel"
+    )
+    response = client.post("/api/spec", data={"query": query})
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ledger"]["audience"] == "traders"
+    assert payload["ledger"]["decision_gate"] == "analysis_ready"
+    assert payload["ledger"]["status"] == "finalized"
+    assert payload["route_decision"]["mode"] == "sync"
+    assert payload["human_review"]["required"] is False
+    assert any("HO is trading $0.35 per gallon over RB" in item for item in payload["provisional_answer"])
+    assert any("Source policy:" in item for item in payload["provisional_answer"])
+    assert any(item["source_type"] == "user" for item in payload["ledger"]["evidence"])
+    assert all(not item["required"] for item in payload["ledger"]["search_plan"])
+
+
 def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
     monkeypatch.setenv("TRADER_RAG_PROVIDER", "disabled")

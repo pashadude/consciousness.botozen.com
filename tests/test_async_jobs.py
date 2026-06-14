@@ -19,9 +19,29 @@ def test_async_route_decision_escalates_trader_risk_prompt() -> None:
     assert decision.mode == "async"
     assert decision.job_kind == "deep_research_and_verification"
     assert decision.expected_spec_gain == "high"
-    assert "high_stakes_trader_decision_frame" in decision.reasons
+    assert "trader_research_evidence_open" in decision.reasons
     assert "external_mcp_research_available" in decision.reasons
     assert "resource_region_telemetry_available" in decision.reasons
+
+
+def test_async_route_decision_keeps_supplied_marks_analysis_sync() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "look at HO/RB arb today with HO at $3.40 and RBOB at $3.05 and give me risk",
+    )
+    for item in ledger.search_plan:
+        assert item.required is False
+    formalize_ledger(ledger)
+
+    decision = route_async_decision(
+        ledger,
+        mcp_configured=False,
+        telemetry_enabled=False,
+    )
+
+    assert decision.mode == "sync"
+    assert decision.job_kind == "sync_spec_response"
 
 
 def test_async_route_decision_keeps_material_clarification_sync() -> None:

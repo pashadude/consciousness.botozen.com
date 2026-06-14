@@ -24,6 +24,12 @@ from app.cli_dashboard import (
 from app.conversation_log import persist_console_talk, persist_human_review_talk
 from app.formalization import formalize_ledger
 from app.jobs import enqueue_async_job
+from app.market_math import (
+    MarketMathFrame,
+    attach_user_market_marks,
+    build_market_math_frame,
+    format_money,
+)
 from app.router import (
     async_jobs_enabled,
     route_async_decision,
@@ -67,6 +73,7 @@ class ConsoleResult:
     frontier_keys: set[str]
     artifact_count: int
     rag_result: TraderRagResult
+    market_math: MarketMathFrame | None = None
 
 
 app = FastAPI(title="Mutual Spec Console")
@@ -197,6 +204,8 @@ async def human_review_json(
         {
             "ledger": ledger.model_dump(mode="json"),
             "human_review": ledger.human_review.model_dump(mode="json"),
+            "status": ledger.status,
+            "status_label": readable_state(ledger.status),
             "decision_gate": ledger.decision_gate,
             "decision_gate_label": readable_state(ledger.decision_gate),
             "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
@@ -212,6 +221,8 @@ def build_console_result(
 ) -> ConsoleResult:
     ledger = SpecLedger()
     update_ledger_from_user_text(ledger, text, artifact_refs=artifacts)
+    market_math = build_market_math_frame(text)
+    attach_user_market_marks(ledger, market_math)
     for stage in ("ingest", "hypothesize_spec", "retrieve_evidence"):
         record_stage(ledger, stage)
         add_route(ledger, route_for_stage(stage, ledger))
@@ -269,6 +280,7 @@ def build_console_result(
         frontier_keys=frontier_keys,
         artifact_count=len(artifacts),
         rag_result=rag_result,
+        market_math=market_math,
     )
 
 
@@ -417,10 +429,10 @@ def render_header(result: ConsoleResult) -> str:
     <p class="subtle">q -> theta -> s | ledger {escape(result.ledger.ledger_id)}</p>
   </div>
   <div class="status-strip">
-    <span class="pill {status_class(result.ledger.status)}">Spec: {escape(readable_state(result.ledger.status))}</span>
-    <span class="pill {verify_class}">Verifier: {'passed' if result.verification_passed else 'blocked'}</span>
-    <span class="pill {gate_class}">Gate: {escape(readable_state(result.ledger.decision_gate))}</span>
-    <span class="pill {route_status_class(route_mode)}">Route: {escape(readable_state(route_mode))}</span>
+    <span id="specStatusPill" class="pill {status_class(result.ledger.status)}">Spec: {escape(readable_state(result.ledger.status))}</span>
+    <span id="verifierStatusPill" class="pill {verify_class}">Verifier: {'passed' if result.verification_passed else 'blocked'}</span>
+    <span id="gateStatusPill" class="pill {gate_class}">Gate: {escape(readable_state(result.ledger.decision_gate))}</span>
+    <span id="routeStatusPill" class="pill {route_status_class(route_mode)}">Route: {escape(readable_state(route_mode))}</span>
   </div>
 </header>
 """
@@ -504,7 +516,7 @@ def render_operator_route_panel(result: ConsoleResult) -> str:
       <h2>Route Before Decision</h2>
       <p class="subtle">The decision frame below is provisional until each required route step clears.</p>
     </div>
-    <span class="pill {gate_status_class(result.ledger.decision_gate)}">{escape(readable_state(result.ledger.decision_gate))}</span>
+    <span id="routeGatePill" class="pill {gate_status_class(result.ledger.decision_gate)}">{escape(readable_state(result.ledger.decision_gate))}</span>
   </div>
   <ol class="route-steps">{rows}</ol>
   {render_model_handoff_plan(result)}
@@ -1296,7 +1308,9 @@ def build_provisional_answer(result: ConsoleResult) -> list[str]:
     ledger = result.ledger
     text = (ledger.expressed_query or ledger.user_request).lower()
     answer: list[str] = []
-    if "sulfur" in text or "sulphur" in text:
+    if result.market_math is not None and any(token in text for token in ("ho/rb", "rbob", "heating oil")):
+        answer.extend(build_market_math_answer_lines(result))
+    elif "sulfur" in text or "sulphur" in text:
         answer.extend(
             [
                 "Immediate answer: not go-ready from the prompt alone. Treat FOB 550 at Umm Qasr for 50,000 tonnes as an offer to verify, not a trade to accept.",
@@ -1329,6 +1343,73 @@ def build_provisional_answer(result: ConsoleResult) -> list[str]:
             + "."
         )
     return answer
+
+
+def build_market_math_answer_lines(result: ConsoleResult) -> list[str]:
+    frame = result.market_math
+    if frame is None:
+        return build_generic_answer_lines(result)
+    marks = frame.marks
+    bbl_equivalent = (
+        f", equal to {format_money(frame.spread_bbl_equivalent)} per barrel"
+        if frame.spread_bbl_equivalent is not None
+        else ""
+    )
+    lines = [
+        (
+            "Immediate answer: from your supplied marks, HO is trading "
+            f"{format_money(frame.spread)} per gallon over RB{bbl_equivalent}."
+        ),
+        (
+            "Deterministic calculation: for a 1x1 NYMEX product spread, 1 cent/gal is about $420; "
+            f"your supplied premium is about {format_money(frame.contract_value_usd, 0)} per 42,000 gallon contract spread."
+        ),
+        (
+            "Risk read: the spread is "
+            f"{frame.risk_label}; long {marks.leg_a}/short {marks.leg_b} is exposed to gasoline strength, distillate weakness, "
+            "refinery yield shifts, inventory surprises, seasonality, and contract-month mismatch."
+        ),
+    ]
+    crack_bits: list[str] = []
+    if frame.leg_a_brent_crack is not None and frame.leg_b_brent_crack is not None:
+        crack_bits.append(
+            "Brent cracks: "
+            f"{marks.leg_a} {format_money(frame.leg_a_brent_crack)}/bbl, "
+            f"{marks.leg_b} {format_money(frame.leg_b_brent_crack)}/bbl"
+        )
+    if frame.leg_a_wti_crack is not None and frame.leg_b_wti_crack is not None:
+        crack_bits.append(
+            "WTI cracks: "
+            f"{marks.leg_a} {format_money(frame.leg_a_wti_crack)}/bbl, "
+            f"{marks.leg_b} {format_money(frame.leg_b_wti_crack)}/bbl"
+        )
+    if crack_bits:
+        lines.append("Crude context: " + "; ".join(crack_bits) + ".")
+    lines.extend(
+        [
+            (
+                "Model reasoning frame: interpreted thesis is relative-value spread risk, "
+                f"using {marks.timeframe or 'user-supplied current'} marks; this is analysis, not execution."
+            ),
+            (
+                "Source policy: I did not need live search to do this calculation. "
+                "Before calling external market/search tools, ask: do you want me to verify these marks live and pull inventory/crack context?"
+            ),
+            (
+                "Verifier rule: do not convert this into a go/no-go trade until contract month, hedge ratio, "
+                "position direction, stop horizon, liquidity, margin, and source freshness are confirmed."
+            ),
+            (
+                "Falsification triggers: HO/RB premium compresses by 5-10 cents/gal, gasoline cracks outperform, "
+                "distillate inventories build, refinery runs shift yields, or crude leg explains the move instead of product relative value."
+            ),
+        ]
+    )
+    if result.rag_result.evidence:
+        lines.append("Source layer: retrieved cited evidence is attached; use it to verify marks and drivers.")
+    else:
+        lines.append("Source layer: no live cited evidence was retrieved; calculation uses user-supplied marks only.")
+    return lines
 
 
 def build_generic_answer_lines(result: ConsoleResult) -> list[str]:
@@ -1907,6 +1988,9 @@ const ledgerPayload = document.querySelector("#ledgerPayload");
 const humanReviewNote = document.querySelector("#humanReviewNote");
 const humanReviewResult = document.querySelector("#humanReviewResult");
 const humanReviewStatusPill = document.querySelector("#humanReviewStatusPill");
+const specStatusPill = document.querySelector("#specStatusPill");
+const gateStatusPill = document.querySelector("#gateStatusPill");
+const routeGatePill = document.querySelector("#routeGatePill");
 let recorder = null;
 let chunks = [];
 
@@ -1941,6 +2025,29 @@ function readableStatus(status) {
     rejected: "rejected"
   };
   return labels[status] || String(status || "").replaceAll("_", " ");
+}
+
+function pillClassForGate(status) {
+  if (["analysis_ready", "alert_ready", "decision_frame_ready", "finalized", "ready", "go"].includes(status)) return "verified";
+  if (status === "needs_more_info" || status === "blocked") return "blocked";
+  if (status === "clarifying") return "clarify";
+  return "clarify";
+}
+
+function pillClassForSpec(status) {
+  if (status === "finalized") return "verified";
+  if (status === "async_pending") return "async";
+  if (status === "clarifying") return "clarify";
+  if (status === "failed") return "blocked";
+  return "neutral";
+}
+
+function updateGatePills(status, label) {
+  for (const pill of [gateStatusPill, routeGatePill]) {
+    if (!pill) continue;
+    pill.className = `pill ${pillClassForGate(status)}`;
+    pill.textContent = pill === gateStatusPill ? `Gate: ${label}` : label;
+  }
 }
 
 function appendFile(file) {
@@ -1995,6 +2102,13 @@ document.querySelectorAll("[data-review-action]").forEach(button => {
       if (humanReviewStatusPill) {
         humanReviewStatusPill.className = `pill ${pillClassForReview(payload.human_review.status)}`;
         humanReviewStatusPill.textContent = readableStatus(payload.human_review.status);
+      }
+      if (specStatusPill && payload.status) {
+        specStatusPill.className = `pill ${pillClassForSpec(payload.status)}`;
+        specStatusPill.textContent = `Spec: ${payload.status_label || readableStatus(payload.status)}`;
+      }
+      if (payload.decision_gate) {
+        updateGatePills(payload.decision_gate, payload.decision_gate_label || readableStatus(payload.decision_gate));
       }
       if (humanReviewResult) {
         humanReviewResult.textContent = `${payload.operator_message} Gate: ${payload.decision_gate_label}.`;

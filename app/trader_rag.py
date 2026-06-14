@@ -150,6 +150,7 @@ class TraderSourceConfig:
     spanner_documents_table: str | None = None
     spanner_chunks_table: str | None = None
     spanner_embedding_model: str | None = None
+    spanner_search_mode: str = "hybrid"
     vertex_ai_search_data_store_id: str | None = None
     vertex_ai_search_engine_id: str | None = None
     mcp_research_url: str | None = None
@@ -292,6 +293,11 @@ def load_trader_source_config(env: Mapping[str, str] | None = None) -> TraderSou
             env_key="embedding_model_env",
         )
         or "RagEmbeddingModel",
+        spanner_search_mode=(
+            configured_value(env.get("SPANNER_RAG_SEARCH_MODE"))
+            or configured_value(str(spanner_cfg.get("search_mode") or ""))
+            or "hybrid"
+        ).lower(),
         vertex_ai_search_data_store_id=value_from_env_or_yaml(
             env,
             env_name="VERTEX_AI_SEARCH_DATA_STORE_ID",
@@ -1055,6 +1061,7 @@ def query_spanner_chunks(
     limit: int,
 ) -> list[SearchEvidence]:
     table = safe_spanner_identifier(config.spanner_chunks_table or "RagChunks")
+    model = safe_spanner_identifier(config.spanner_embedding_model or "RagEmbeddingModel")
     search_limit = min(max(limit * 4, limit), 50)
     from google.cloud import spanner
 
@@ -1067,9 +1074,11 @@ def query_spanner_chunks(
         rows = execute_spanner_search(
             database=database,
             table=table,
+            model=model,
             query=query,
             limit=search_limit,
             param_types=spanner.param_types,
+            mode=config.spanner_search_mode,
         )
     except Exception as search_exc:
         try:
@@ -1129,6 +1138,46 @@ def execute_spanner_search(
     *,
     database: Any,
     table: str,
+    model: str,
+    query: str,
+    limit: int,
+    param_types: Any,
+    mode: str,
+) -> list[Any]:
+    mode = (mode or "hybrid").lower()
+    if mode in {"semantic", "text", "fulltext", "full_text"}:
+        return execute_spanner_semantic_search(
+            database=database,
+            table=table,
+            query=query,
+            limit=limit,
+            param_types=param_types,
+        )
+    if mode in {"vector", "embedding", "ann"}:
+        return execute_spanner_vector_search(
+            database=database,
+            table=table,
+            model=model,
+            query=query,
+            limit=limit,
+            param_types=param_types,
+        )
+    if mode in {"hybrid", "rrf"}:
+        return execute_spanner_hybrid_search(
+            database=database,
+            table=table,
+            model=model,
+            query=query,
+            limit=limit,
+            param_types=param_types,
+        )
+    raise ValueError(f"Unsupported SPANNER_RAG_SEARCH_MODE={mode}")
+
+
+def execute_spanner_semantic_search(
+    *,
+    database: Any,
+    table: str,
     query: str,
     limit: int,
     param_types: Any,
@@ -1147,6 +1196,135 @@ def execute_spanner_search(
                 param_types={
                     "query": param_types.STRING,
                     "limit": param_types.INT64,
+                },
+            )
+        )
+
+
+def execute_spanner_vector_search(
+    *,
+    database: Any,
+    table: str,
+    model: str,
+    query: str,
+    limit: int,
+    param_types: Any,
+) -> list[Any]:
+    sql = f"""
+        WITH query_embedding AS (
+          SELECT ARRAY(
+            SELECT CAST(value AS FLOAT32)
+            FROM UNNEST((
+              SELECT embeddings.values
+              FROM ML.PREDICT(
+                MODEL {model},
+                (SELECT @query AS content, "RETRIEVAL_QUERY" AS task_type),
+                STRUCT(768 AS outputDimensionality)
+              )
+            )) AS value
+          ) AS embedding
+        )
+        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
+        FROM {table}, query_embedding
+        WHERE Embedding IS NOT NULL
+        ORDER BY APPROX_COSINE_DISTANCE(
+          query_embedding.embedding,
+          Embedding,
+          OPTIONS => JSON '{{"num_leaves_to_search": 50}}'
+        )
+        LIMIT @limit
+    """
+    with database.snapshot() as snapshot:
+        return list(
+            snapshot.execute_sql(
+                sql,
+                params={"query": query, "limit": limit},
+                param_types={
+                    "query": param_types.STRING,
+                    "limit": param_types.INT64,
+                },
+            )
+        )
+
+
+def execute_spanner_hybrid_search(
+    *,
+    database: Any,
+    table: str,
+    model: str,
+    query: str,
+    limit: int,
+    param_types: Any,
+) -> list[Any]:
+    candidate_limit = max(limit * 10, 50)
+    sql = f"""
+        WITH query_embedding AS (
+          SELECT ARRAY(
+            SELECT CAST(value AS FLOAT32)
+            FROM UNNEST((
+              SELECT embeddings.values
+              FROM ML.PREDICT(
+                MODEL {model},
+                (SELECT @query AS content, "RETRIEVAL_QUERY" AS task_type),
+                STRUCT(768 AS outputDimensionality)
+              )
+            )) AS value
+          ) AS embedding
+        ),
+        vector_candidates AS (
+          SELECT OFFSET AS rank, candidate.DocId, candidate.ChunkId
+          FROM UNNEST(ARRAY(
+            SELECT AS STRUCT DocId, ChunkId
+            FROM {table}, query_embedding
+            WHERE Embedding IS NOT NULL
+            ORDER BY APPROX_COSINE_DISTANCE(
+              query_embedding.embedding,
+              Embedding,
+              OPTIONS => JSON '{{"num_leaves_to_search": 50}}'
+            )
+            LIMIT @candidate_limit
+          )) AS candidate WITH OFFSET
+        ),
+        text_candidates AS (
+          SELECT OFFSET AS rank, candidate.DocId, candidate.ChunkId
+          FROM UNNEST(ARRAY(
+            SELECT AS STRUCT DocId, ChunkId
+            FROM {table}
+            WHERE SEARCH(ChunkTokens, @query)
+            ORDER BY SCORE(ChunkTokens, @query) DESC
+            LIMIT @candidate_limit
+          )) AS candidate WITH OFFSET
+        ),
+        fused AS (
+          SELECT DocId, ChunkId, SUM(1.0 / (60 + rank)) AS rrf_score
+          FROM (
+            SELECT DocId, ChunkId, rank FROM vector_candidates
+            UNION ALL
+            SELECT DocId, ChunkId, rank FROM text_candidates
+          )
+          GROUP BY DocId, ChunkId
+        )
+        SELECT c.ChunkId, c.DocId, c.SourceDataset, c.ChunkText, c.PublishedAt, c.Source, c.Commodities, c.Tags
+        FROM fused AS f
+        JOIN {table} AS c
+          ON c.DocId = f.DocId
+          AND c.ChunkId = f.ChunkId
+        ORDER BY f.rrf_score DESC
+        LIMIT @limit
+    """
+    with database.snapshot() as snapshot:
+        return list(
+            snapshot.execute_sql(
+                sql,
+                params={
+                    "query": query,
+                    "limit": limit,
+                    "candidate_limit": candidate_limit,
+                },
+                param_types={
+                    "query": param_types.STRING,
+                    "limit": param_types.INT64,
+                    "candidate_limit": param_types.INT64,
                 },
             )
         )

@@ -1927,7 +1927,9 @@ def infer_audience(text: str) -> str | None:
                     break
                 trimmed.append(word)
             if trimmed:
-                return " ".join(trimmed[:8])
+                audience = " ".join(trimmed[:8])
+                if not looks_like_market_phrase(audience):
+                    return audience
     audience_keywords = {
         "executives": "executives",
         "engineers": "engineers",
@@ -1991,7 +1993,7 @@ def infer_constraints(text: str) -> list[str]:
 def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     if not looks_like_trader_query(text):
         return
-    if not ledger.audience:
+    if not ledger.audience or looks_like_market_phrase(ledger.audience):
         ledger.audience = "traders"
     if not ledger.output_format:
         ledger.output_format = "decision frame"
@@ -2012,13 +2014,21 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     if any(token in lower for token in ("spread", "brent", "wti", "basis", "risk", "fob", "offer")):
         add_unique(ledger.latent_intent_hypotheses, "Estimate basis, market, liquidity, and falsification risk for the spread or thesis.")
 
-    for item in (
+    evidence_contracts = [
         "IBKR may be used for futures history and market data only; do not place orders or expose broker execution.",
         "Yahoo Finance may be used only as a proxy/reference source and must carry calibration assumptions.",
         "Commodity feeds must record freshness, entitlement, units, transform, confidence, and lookahead guard.",
         "Search/tool evidence must be retrieved through Google Agent SDK search tools, MCP/Opoint, Google CSE/RAG, Vertex AI Search, or explicitly marked model-only evidence before market claims are trusted.",
-        "Physical commodity offers must verify product specification, quantity tolerance, Incoterms, load port, laycan, counterparty identity, title chain, payment terms, sanctions exposure, freight, insurance, inspection, and resale path.",
-    ):
+    ]
+    if is_physical_offer_query(lower):
+        evidence_contracts.append(
+            "Physical commodity offers must verify product specification, quantity tolerance, Incoterms, load port, laycan, counterparty identity, title chain, payment terms, sanctions exposure, freight, insurance, inspection, and resale path."
+        )
+    if is_relative_value_spread_query(lower):
+        evidence_contracts.append(
+            "Relative-value spread frames must map legs, units, contract months, ratio, source timestamp, sensitivity, liquidity, and falsification triggers before execution."
+        )
+    for item in evidence_contracts:
         add_unique(ledger.evidence_contract, item)
 
     for item in (
@@ -2026,9 +2036,18 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
         "Include legal, logistics, sanctions, market, basis, and counterparty risk flags when relevant.",
         "Return a decision frame for the trader, not a buy/sell recommendation.",
         "Include falsification triggers and missing data before marking the frame ready.",
-        "For physical offers, do not mark go/no-go ready until product spec, documents, counterparty, payment, logistics, and market exit are verified.",
     ):
         add_unique(ledger.verification_conditions, item)
+    if is_physical_offer_query(lower):
+        add_unique(
+            ledger.verification_conditions,
+            "For physical offers, do not mark go/no-go ready until product spec, documents, counterparty, payment, logistics, and market exit are verified.",
+        )
+    if is_relative_value_spread_query(lower):
+        add_unique(
+            ledger.verification_conditions,
+            "For relative-value spreads, calculate unit-normalized spread risk from supplied marks and ask before live verification search.",
+        )
 
     for item in (
         "No broker order placement, execution management, or live trading workflow.",
@@ -2043,6 +2062,26 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     ):
         add_unique(ledger.success_criteria, item)
     plan_trader_evidence_search(ledger, text)
+
+
+def looks_like_market_phrase(text: str) -> bool:
+    lower = text.lower()
+    market_terms = (
+        "heating oil",
+        "rbob",
+        "rb ",
+        "gasoline",
+        "brent",
+        "wti",
+        "crude",
+        "sulfur",
+        "sulphur",
+        "fob",
+        "$",
+        "per gallon",
+        "per barrel",
+    )
+    return any(term in lower for term in market_terms)
 
 
 def looks_like_trader_query(text: str) -> bool:
@@ -2105,15 +2144,30 @@ def plan_trader_evidence_search(ledger: SpecLedger, text: str) -> SpecLedger:
     lower = text.lower()
     required = trader_required_evidence(lower)
     queries = trader_search_queries(lower)
+    optional_live_search = is_relative_value_spread_query(lower) and has_user_supplied_market_marks(lower)
     for index, (query, purpose) in enumerate(zip(queries, required, strict=False), start=1):
         add_search_plan_item(
             ledger,
             query=query,
             purpose=purpose,
             query_id=f"trader:{stable_id(query)}:{index}",
+            required=not optional_live_search,
+        )
+    if optional_live_search:
+        add_search_plan_item(
+            ledger,
+            query="HO RB RBOB Heating Oil gasoline spread live prices inventory crack spread",
+            purpose="Optional live verification of user-supplied market marks and current HO/RB spread drivers.",
+            query_id=f"trader:{stable_id('optional-live-ho-rb-verification')}:optional",
+            required=False,
         )
     for purpose in required:
         add_unique(ledger.verification_conditions, purpose)
+    if optional_live_search:
+        add_unique(
+            ledger.verification_conditions,
+            "Ask whether the user wants live source verification before calling external market/search tools; user-supplied marks support provisional math only.",
+        )
     record_evidence_source(
         ledger,
         EvidenceSourceStatus(
@@ -2138,7 +2192,7 @@ def trader_required_evidence(lower_text: str) -> list[str]:
             "Human-AI collaboration constraints: compatibility, bounded memory, and true user welfare.",
             "Proof-carrying response structure: assumptions, claims, dependencies, tests, and verifier states.",
         ]
-    base = [
+    physical_offer = [
         "Price benchmark and market context near the offer date.",
         "Product specification, grade, quantity tolerance, and inspection standard.",
         "Counterparty identity, title chain, documents, and payment terms.",
@@ -2147,8 +2201,15 @@ def trader_required_evidence(lower_text: str) -> list[str]:
         "Resale path, buyer demand, hedge/proxy availability, and netback economics.",
     ]
     if "sulfur" in lower_text or "sulphur" in lower_text:
-        return base
-    return base[:4]
+        return physical_offer
+    if is_relative_value_spread_query(lower_text):
+        return [
+            "User-supplied or live-verified HO/RB, Brent, and WTI marks with units and timestamp.",
+            "Contract and leg mapping: HO, RBOB/RB, contract month, ratio, and unit conversion.",
+            "Spread risk frame: dollar sensitivity, crude-relative cracks, basis, liquidity, and margin risk.",
+            "Falsification triggers: inventory, seasonality, refinery runs, demand shocks, and crack-spread regime changes.",
+        ]
+    return physical_offer[:4]
 
 
 def trader_search_queries(lower_text: str) -> list[str]:
@@ -2167,6 +2228,13 @@ def trader_search_queries(lower_text: str) -> list[str]:
             '"Umm Qasr" port sulfur cargo loading inspection',
             '"Iraq" "Umm Qasr" sanctions shipping payment sulfur',
             '"sulfur" 50000 tonnes FOB offer counterparty risk',
+        ]
+    if is_relative_value_spread_query(lower_text):
+        return [
+            '"HO/RB" "Heating Oil" RBOB spread price',
+            '"heating oil" RBOB gasoline spread crack',
+            '"HO" "RB" futures contract specifications gallons',
+            '"distillate" gasoline inventories heating oil RBOB spread risk',
         ]
     terms = extract_trader_search_terms(lower_text)
     base = " ".join(terms[:5]) or "commodity offer"
@@ -2203,6 +2271,34 @@ def extract_trader_search_terms(lower_text: str) -> list[str]:
     return [term for term in candidates if term in lower_text]
 
 
+def is_relative_value_spread_query(lower_text: str) -> bool:
+    return any(token in lower_text for token in ("ho/rb", "rbob", "heating oil", "brent", "wti", "spread", "arb", "arbitrage"))
+
+
+def is_physical_offer_query(lower_text: str) -> bool:
+    return any(
+        token in lower_text
+        for token in (
+            "offer",
+            "fob",
+            "cfr",
+            "cif",
+            "cargo",
+            "ton",
+            "tonne",
+            "tonns",
+            "mt",
+            "counterparty",
+            "umm qasr",
+        )
+    )
+
+
+def has_user_supplied_market_marks(lower_text: str) -> bool:
+    has_price = bool(re.search(r"\$?\s*\d+(?:\.\d+)?", lower_text))
+    return has_price and any(token in lower_text for token in ("today", "current", "sits", "trading", "price"))
+
+
 def add_search_plan_item(
     ledger: SpecLedger,
     *,
@@ -2221,11 +2317,13 @@ def add_search_plan_item(
         ]
     ]
     | None = None,
+    required: bool = True,
 ) -> SearchPlanItem:
     item = SearchPlanItem(
         query_id=query_id or f"search:{stable_id(query)}",
         query=query,
         purpose=purpose,
+        required=required,
         preferred_sources=preferred_sources
         or [
             "google_agent_search",
@@ -2242,6 +2340,7 @@ def add_search_plan_item(
             ledger.search_plan[index] = existing.model_copy(
                 update={
                     "purpose": item.purpose,
+                    "required": item.required,
                     "preferred_sources": item.preferred_sources,
                 }
             )

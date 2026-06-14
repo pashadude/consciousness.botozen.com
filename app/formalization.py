@@ -211,10 +211,7 @@ class TraderDecisionFrameTask(FormalizationTask):
             "instrument_mapping": bool(
                 problem.get("detected_instruments") or hypothesis.get("detected_instruments")
             ),
-            "horizon_or_timeframe": contains_any(
-                hypothesis,
-                ("horizon", "timeframe", "intraday", "next", "day", "week", "month", "m1", "q1"),
-            ),
+            "horizon_or_timeframe": contains_trader_time_scope(problem, hypothesis),
             "data_source_contract": contains_any(
                 hypothesis,
                 ("ibkr", "yahoo", "source", "freshness", "entitlement", "confidence"),
@@ -497,6 +494,26 @@ def extract_actions(text: str) -> list[str]:
 def contains_any(value: Any, needles: tuple[str, ...]) -> bool:
     text = stringify(value)
     return any(needle in text for needle in needles)
+
+
+def contains_trader_time_scope(
+    problem: Mapping[str, Any],
+    hypothesis: Mapping[str, Any],
+) -> bool:
+    text = " ".join(
+        [
+            str(problem.get("expressed_query") or ""),
+            str(hypothesis.get("goal") or ""),
+            stringify(hypothesis.get("assumptions") or []),
+        ]
+    ).lower()
+    return bool(
+        re.search(
+            r"\b(today|current|intraday|next\s+(?:day|week|month)|this\s+(?:week|month)|"
+            r"day|week|month|m1|q1|q2|q3|q4|prompt|spot|now)\b",
+            text,
+        )
+    )
 
 
 def stringify(value: Any) -> str:

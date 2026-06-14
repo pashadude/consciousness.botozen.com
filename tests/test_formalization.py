@@ -48,6 +48,19 @@ def test_trader_formalization_can_validate_complete_decision_frame() -> None:
     assert record.class_id == 243
 
 
+def test_trader_formalization_accepts_today_market_marks_as_timeframe() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "look at HO/RB arb today with HO at $3.40 and RBOB at $3.05 and give me risk",
+    )
+
+    record = formalize_ledger(ledger)
+
+    assert record.is_valid == 1
+    assert "horizon_or_timeframe" not in record.missing_obligations
+
+
 def test_physical_offer_formalization_maps_sulfur_and_fob_cargo() -> None:
     ledger = SpecLedger()
     update_ledger_from_user_text(
