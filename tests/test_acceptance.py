@@ -3,6 +3,7 @@ from app.spec_state import (
     ArtifactRef,
     SpecLedger,
     add_evidence_from_artifacts,
+    apply_alignment_signal,
     build_clarification_question,
     needs_clarification,
     record_stage,
@@ -215,6 +216,44 @@ def test_mutual_spec_game_state_is_materialized_from_query() -> None:
     assert ledger.user_endorsement.endorsed_fields
     assert ledger.skill_compatibility.handoff_format == "implementation_plan"
     assert ledger.spec_convergence.overall > 0
+
+
+def test_user_alignment_signal_endorses_latent_task() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "look at HO/RB arb today with HO at $3.40 and RBOB at $3.05 and give me risk",
+    )
+
+    assert "latent_task" in ledger.user_endorsement.pending_fields
+    assert ledger.spec_convergence.status != "verified"
+
+    apply_alignment_signal(ledger, action="endorse", note="yes, this is the spread risk task")
+
+    stage = next(item for item in ledger.game_states if item.stage_id == "mutual_alignment")
+    assert stage.status == "satisfied"
+    assert "latent_task" in ledger.user_endorsement.endorsed_fields
+    assert "latent_task" not in ledger.user_endorsement.pending_fields
+    assert ledger.alignment_signals[-1].action == "endorse"
+
+
+def test_user_alignment_correction_reopens_shared_spec() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        "look at HO/RB arb today with HO at $3.40 and RBOB at $3.05 and give me risk",
+    )
+
+    apply_alignment_signal(
+        ledger,
+        action="correct",
+        note="not execution, build a one-week alert spec and verify inventory first",
+    )
+
+    assert ledger.status == "clarifying"
+    assert ledger.decision_gate == "needs_more_info"
+    assert "latent_task" in ledger.user_endorsement.rejected_fields
+    assert any(item.field == "latent_task" for item in ledger.ambiguities)
 
 
 def test_lean_bridge_generates_only_gate_invariants(monkeypatch) -> None:

@@ -15,6 +15,7 @@ def test_console_home_renders_multimodal_operator_surface() -> None:
     assert 'accept="image/*,audio/*,application/pdf,text/*"' in response.text
     assert "Record Speech" in response.text
     assert "Route Before Decision" in response.text
+    assert "Alignment Loop" in response.text
     assert "Model Handoff Plan" in response.text
     assert "Model-Region Frontier" in response.text
 
@@ -128,6 +129,38 @@ def test_console_ho_rb_marks_produce_calculated_analysis_frame(tmp_path, monkeyp
     assert any("Source policy:" in item for item in payload["provisional_answer"])
     assert any(item["source_type"] == "user" for item in payload["ledger"]["evidence"])
     assert all(not item["required"] for item in payload["ledger"]["search_plan"])
+
+
+def test_console_alignment_api_records_user_correction(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("USER_TALKS_LOCAL_DIR", str(tmp_path / "talks"))
+    monkeypatch.setenv("TRADER_RAG_PROVIDER", "disabled")
+    client = TestClient(app)
+
+    spec_response = client.post(
+        "/api/spec",
+        data={
+            "query": "look at HO/RB arb today with HO at $3.40 and RBOB at $3.05 and give me risk"
+        },
+    )
+    spec_payload = spec_response.json()
+
+    response = client.post(
+        "/api/alignment",
+        json={
+            "ledger": spec_payload["ledger"],
+            "action": "correct",
+            "note": "not execution, build a one-week alert spec and verify inventories first",
+        },
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["decision_gate"] == "needs_more_info"
+    assert payload["status"] == "clarifying"
+    assert payload["alignment_signals"][-1]["action"] == "correct"
+    assert "latent_task" in payload["user_endorsement"]["rejected_fields"]
+    assert any((tmp_path / "talks").iterdir())
 
 
 def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) -> None:

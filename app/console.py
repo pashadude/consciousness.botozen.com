@@ -21,7 +21,11 @@ from app.cli_dashboard import (
     estimate_spend,
     google_status,
 )
-from app.conversation_log import persist_console_talk, persist_human_review_talk
+from app.conversation_log import (
+    persist_alignment_talk,
+    persist_console_talk,
+    persist_human_review_talk,
+)
 from app.formalization import formalize_ledger
 from app.jobs import enqueue_async_job
 from app.market_math import (
@@ -41,6 +45,7 @@ from app.spec_state import (
     SpecLedger,
     add_evidence_from_artifacts,
     add_route,
+    apply_alignment_signal,
     record_stage,
     run_lean_formal_proofs,
     update_ledger_from_user_text,
@@ -210,6 +215,44 @@ async def human_review_json(
             "decision_gate_label": readable_state(ledger.decision_gate),
             "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
             "operator_message": message,
+        }
+    )
+
+
+@app.post("/api/alignment")
+async def alignment_json(payload: dict = JSON_BODY) -> JSONResponse:
+    ledger_payload = payload.get("ledger")
+    if not isinstance(ledger_payload, dict):
+        raise HTTPException(status_code=400, detail="ledger payload is required")
+    action = str(payload.get("action") or "").strip().lower()
+    note = str(payload.get("note") or "").strip()
+    raw_fields = payload.get("fields") or ["latent_task", "evidence_contract"]
+    fields = [str(item).strip() for item in raw_fields if str(item).strip()]
+    ledger = SpecLedger.model_validate(ledger_payload)
+    try:
+        apply_alignment_signal(ledger, action=action, note=note, fields=fields)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    message = alignment_message(action, ledger)
+    persist_alignment_talk(
+        ledger=ledger,
+        action=action,
+        note=note,
+        message=message,
+    )
+    return JSONResponse(
+        {
+            "ledger": ledger.model_dump(mode="json"),
+            "user_endorsement": ledger.user_endorsement.model_dump(mode="json"),
+            "alignment_signals": [
+                item.model_dump(mode="json") for item in ledger.alignment_signals
+            ],
+            "status": ledger.status,
+            "status_label": readable_state(ledger.status),
+            "decision_gate": ledger.decision_gate,
+            "decision_gate_label": readable_state(ledger.decision_gate),
+            "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
+            "alignment_message": message,
         }
     )
 
@@ -453,6 +496,7 @@ def render_workspace(
   <section class="center-rail">
     {render_operator_route_panel(result)}
     {render_decision_summary_panel(result)}
+    {render_alignment_panel(result)}
     {render_game_panel(result)}
     {render_source_layer_panel(result)}
     {render_proof_obligations_panel(result)}
@@ -697,6 +741,16 @@ def apply_operator_review(
     return message
 
 
+def alignment_message(action: str, ledger: SpecLedger) -> str:
+    if action == "endorse":
+        return "User endorsed the inferred latent task and shared specification."
+    if action == "correct":
+        return "User corrected the inferred latent task; the spec is reopened for convergence."
+    if action == "request_evidence":
+        return "User requested evidence before accepting the shared specification."
+    return f"Alignment signal recorded; gate is {readable_state(ledger.decision_gate)}."
+
+
 def has_open_hard_obligations(ledger: SpecLedger) -> bool:
     return (
         any(item.severity == "high" for item in ledger.verification_findings)
@@ -812,6 +866,71 @@ def render_status_panel(env: Mapping[str, str]) -> str:
   <div class="status-grid">{rows}</div>
 </section>
 """
+
+
+def render_alignment_panel(result: ConsoleResult) -> str:
+    ledger = result.ledger
+    convergence = ledger.spec_convergence
+    endorsement = ledger.user_endorsement
+    latent_task = current_latent_task(ledger)
+    latest = ledger.alignment_signals[-1] if ledger.alignment_signals else None
+    signal = (
+        f"{latest.action}: {latest.note or ', '.join(latest.fields)}"
+        if latest
+        else "awaiting user signal"
+    )
+    pending = ", ".join(endorsement.pending_fields) or "none"
+    rejected = ", ".join(endorsement.rejected_fields) or "none"
+    endorsed = ", ".join(endorsement.endorsed_fields) or "none"
+    return f"""
+<section class="panel alignment-panel">
+  <div class="panel-title">
+    <div>
+      <h2>Alignment Loop</h2>
+      <p class="subtle">User and agent update the shared spec before the decision frame is trusted.</p>
+    </div>
+    <span id="alignmentConvergencePill" class="pill {alignment_status_class(convergence.status)}">alignment {convergence.overall:.2f}</span>
+  </div>
+  <div class="alignment-grid">
+    <div>
+      <span class="label-inline">q</span>
+      <p>{escape(ledger.expressed_query or ledger.user_request or 'none')}</p>
+    </div>
+    <div>
+      <span class="label-inline">theta</span>
+      <p>{escape(latent_task)}</p>
+    </div>
+    <div>
+      <span class="label-inline">s</span>
+      <p>{escape(f"goal={ledger.goal or 'unresolved'}; audience={ledger.audience or 'unresolved'}; format={ledger.output_format or 'unresolved'}")}</p>
+    </div>
+  </div>
+  <dl class="kv alignment-kv">
+    <dt>endorsed</dt><dd id="alignmentEndorsed">{escape(endorsed)}</dd>
+    <dt>pending</dt><dd id="alignmentPending">{escape(pending)}</dd>
+    <dt>rejected</dt><dd id="alignmentRejected">{escape(rejected)}</dd>
+    <dt>last move</dt><dd id="alignmentLastSignal">{escape(signal)}</dd>
+  </dl>
+  <div class="review-actions alignment-actions">
+    <label for="alignmentNote">Correction or evidence request</label>
+    <textarea id="alignmentNote" rows="3" placeholder="Example: I meant a 1-week alert, not execution; verify inventory and contract month first."></textarea>
+    <div class="button-row">
+      <button type="button" data-alignment-action="endorse">Endorse Spec</button>
+      <button type="button" data-alignment-action="correct">Correct Theta</button>
+      <button type="button" data-alignment-action="request_evidence">Request Evidence</button>
+    </div>
+    <p id="alignmentResult" class="capture-state">No alignment move submitted in this browser session.</p>
+  </div>
+</section>
+"""
+
+
+def current_latent_task(ledger: SpecLedger) -> str:
+    if ledger.latent_type_beliefs:
+        return ledger.latent_type_beliefs[0].description
+    if ledger.latent_intent_hypotheses:
+        return ledger.latent_intent_hypotheses[0]
+    return "Reconstruct the user's latent task from q."
 
 
 def render_game_panel(result: ConsoleResult) -> str:
@@ -1620,6 +1739,15 @@ def proof_status_class(status: str) -> str:
     }.get(status, "neutral")
 
 
+def alignment_status_class(status: str) -> str:
+    return {
+        "verified": "verified",
+        "executable": "verified",
+        "negotiating": "clarify",
+        "diverged": "blocked",
+    }.get(status, "neutral")
+
+
 def status_word(status: str) -> str:
     return {
         "green": "Ready",
@@ -1923,6 +2051,26 @@ form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; 
   border-radius: 8px;
   background: #fbfcfb;
 }
+.alignment-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.alignment-grid > div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfb;
+}
+.alignment-grid p {
+  font-size: 13px;
+  line-height: 1.4;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+.alignment-kv { margin-top: 12px; }
+.alignment-actions textarea { width: 100%; resize: vertical; }
 .label-inline {
   color: var(--muted);
   font-size: 12px;
@@ -1966,7 +2114,7 @@ tr.dominated td { color: var(--muted); }
 }
 @media (max-width: 760px) {
   .shell { width: min(100vw - 20px, 720px); padding-top: 12px; }
-  .topbar, .workspace, .right-rail, .spec-grid, .detail-grid { display: flex; flex-direction: column; }
+  .topbar, .workspace, .right-rail, .spec-grid, .detail-grid, .alignment-grid { display: flex; flex-direction: column; }
   h1 { font-size: 21px; }
 }
 """
@@ -1991,6 +2139,13 @@ const humanReviewStatusPill = document.querySelector("#humanReviewStatusPill");
 const specStatusPill = document.querySelector("#specStatusPill");
 const gateStatusPill = document.querySelector("#gateStatusPill");
 const routeGatePill = document.querySelector("#routeGatePill");
+const alignmentNote = document.querySelector("#alignmentNote");
+const alignmentResult = document.querySelector("#alignmentResult");
+const alignmentConvergencePill = document.querySelector("#alignmentConvergencePill");
+const alignmentEndorsed = document.querySelector("#alignmentEndorsed");
+const alignmentPending = document.querySelector("#alignmentPending");
+const alignmentRejected = document.querySelector("#alignmentRejected");
+const alignmentLastSignal = document.querySelector("#alignmentLastSignal");
 let recorder = null;
 let chunks = [];
 
@@ -2042,12 +2197,32 @@ function pillClassForSpec(status) {
   return "neutral";
 }
 
+function pillClassForAlignment(status) {
+  if (status === "verified" || status === "executable") return "verified";
+  if (status === "negotiating") return "clarify";
+  if (status === "diverged") return "blocked";
+  return "neutral";
+}
+
 function updateGatePills(status, label) {
   for (const pill of [gateStatusPill, routeGatePill]) {
     if (!pill) continue;
     pill.className = `pill ${pillClassForGate(status)}`;
     pill.textContent = pill === gateStatusPill ? `Gate: ${label}` : label;
   }
+}
+
+function updateAlignmentPanel(payload) {
+  const convergence = payload.spec_convergence || {};
+  const endorsement = payload.user_endorsement || {};
+  if (alignmentConvergencePill) {
+    alignmentConvergencePill.className = `pill ${pillClassForAlignment(convergence.status)}`;
+    alignmentConvergencePill.textContent = `alignment ${Number(convergence.overall || 0).toFixed(2)}`;
+  }
+  if (alignmentEndorsed) alignmentEndorsed.textContent = (endorsement.endorsed_fields || []).join(", ") || "none";
+  if (alignmentPending) alignmentPending.textContent = (endorsement.pending_fields || []).join(", ") || "none";
+  if (alignmentRejected) alignmentRejected.textContent = (endorsement.rejected_fields || []).join(", ") || "none";
+  if (alignmentLastSignal) alignmentLastSignal.textContent = endorsement.last_signal || "none";
 }
 
 function appendFile(file) {
@@ -2115,6 +2290,42 @@ document.querySelectorAll("[data-review-action]").forEach(button => {
       }
     } catch (error) {
       if (humanReviewResult) humanReviewResult.textContent = error.message || "review failed";
+    } finally {
+      button.disabled = false;
+    }
+  });
+});
+
+document.querySelectorAll("[data-alignment-action]").forEach(button => {
+  button.addEventListener("click", async () => {
+    const action = button.dataset.alignmentAction;
+    button.disabled = true;
+    if (alignmentResult) alignmentResult.textContent = "submitting alignment move...";
+    try {
+      const response = await fetch("/api/alignment", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action,
+          note: alignmentNote?.value || "",
+          fields: ["latent_task", "evidence_contract"],
+          ledger: currentLedgerPayload()
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "alignment failed");
+      setLedgerPayload(payload.ledger);
+      updateAlignmentPanel(payload);
+      if (specStatusPill && payload.status) {
+        specStatusPill.className = `pill ${pillClassForSpec(payload.status)}`;
+        specStatusPill.textContent = `Spec: ${payload.status_label || readableStatus(payload.status)}`;
+      }
+      if (payload.decision_gate) {
+        updateGatePills(payload.decision_gate, payload.decision_gate_label || readableStatus(payload.decision_gate));
+      }
+      if (alignmentResult) alignmentResult.textContent = payload.alignment_message || "alignment move recorded";
+    } catch (error) {
+      if (alignmentResult) alignmentResult.textContent = error.message || "alignment failed";
     } finally {
       button.disabled = false;
     }

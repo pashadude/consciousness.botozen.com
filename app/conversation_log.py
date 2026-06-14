@@ -49,6 +49,9 @@ def persist_console_talk(
             item.model_dump(mode="json") for item in ledger.latent_type_beliefs
         ],
         "commitments": [item.model_dump(mode="json") for item in ledger.commitments],
+        "alignment_signals": [
+            item.model_dump(mode="json") for item in ledger.alignment_signals
+        ],
         "claim_graph": [item.model_dump(mode="json") for item in ledger.claim_graph],
         "proof_obligations": [
             item.model_dump(mode="json") for item in ledger.proof_obligations
@@ -110,6 +113,46 @@ def persist_human_review_talk(
         "verification_findings": [
             item.model_dump(mode="json") for item in ledger.verification_findings
         ],
+        "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
+    }
+    local_uri = write_local_record(record, env)
+    maybe_upload_record(record, created_at, ledger.ledger_id, env)
+    return local_uri
+
+
+def persist_alignment_talk(
+    *,
+    ledger: Any,
+    action: str,
+    note: str,
+    message: str,
+    env: dict[str, str] | None = None,
+) -> str | None:
+    env = env or dict(os.environ)
+    if not env_flag(env.get("USER_TALKS_RAG_LOG_ENABLED"), default=True):
+        return None
+    created_at = datetime.now(UTC).isoformat()
+    record = {
+        "schema_version": 1,
+        "kind": "mutual_spec_alignment_signal",
+        "created_at": created_at,
+        "ledger_id": ledger.ledger_id,
+        "alignment_action": action,
+        "alignment_note": note,
+        "alignment_message": message,
+        "expressed_query": ledger.expressed_query or ledger.user_request,
+        "goal": ledger.goal,
+        "audience": ledger.audience,
+        "output_format": ledger.output_format,
+        "latent_type_beliefs": [
+            item.model_dump(mode="json") for item in ledger.latent_type_beliefs
+        ],
+        "alignment_signals": [
+            item.model_dump(mode="json") for item in ledger.alignment_signals
+        ],
+        "user_endorsement": ledger.user_endorsement.model_dump(mode="json"),
+        "decision_gate": ledger.decision_gate,
+        "status": ledger.status,
         "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
     }
     local_uri = write_local_record(record, env)

@@ -176,6 +176,17 @@ class CommitmentRecord(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
+class AlignmentSignal(BaseModel):
+    """User move in the mutual alignment game."""
+
+    signal_id: str = Field(default_factory=lambda: f"align-{uuid4().hex[:12]}")
+    player_id: Literal["user", "agent"] = "user"
+    action: Literal["endorse", "correct", "request_evidence"]
+    fields: list[str] = Field(default_factory=list)
+    note: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+
 class ClaimRecord(BaseModel):
     """Claim graph node for proof-carrying responses."""
 
@@ -443,6 +454,7 @@ class SpecLedger(BaseModel):
     game_states: list[GameStageState] = Field(default_factory=list)
     latent_type_beliefs: list[LatentTypeBelief] = Field(default_factory=list)
     commitments: list[CommitmentRecord] = Field(default_factory=list)
+    alignment_signals: list[AlignmentSignal] = Field(default_factory=list)
     claim_graph: list[ClaimRecord] = Field(default_factory=list)
     proof_obligations: list[ProofObligationRecord] = Field(default_factory=list)
     equilibrium_diagnostics: EquilibriumDiagnosticState = Field(
@@ -775,17 +787,51 @@ def sync_user_endorsement(ledger: SpecLedger) -> None:
     present = [field for field in MATERIAL_FIELDS if getattr(ledger, field)]
     missing = [field for field in MATERIAL_FIELDS if not getattr(ledger, field)]
     rejected = sorted({item.field for item in ledger.ambiguities if item.severity == "high"})
-    endorsed = [field for field in present if field not in rejected]
+    pending = list(missing)
+    if ledger.latent_type_beliefs and "latent_task" not in pending:
+        pending.append("latent_task")
+    if ledger.evidence_contract and "evidence_contract" not in pending:
+        pending.append("evidence_contract")
+    latest_signal = ledger.alignment_signals[-1] if ledger.alignment_signals else None
+    if latest_signal:
+        if latest_signal.action == "endorse":
+            for field in latest_signal.fields or ["latent_task", "evidence_contract"]:
+                if field not in present and field not in {"latent_task", "evidence_contract"}:
+                    continue
+                if field in pending:
+                    pending.remove(field)
+                if field not in present:
+                    present.append(field)
+        elif latest_signal.action == "correct":
+            for field in latest_signal.fields or ["latent_task"]:
+                if field not in rejected:
+                    rejected.append(field)
+                if field not in pending:
+                    pending.append(field)
+        elif latest_signal.action == "request_evidence":
+            if "evidence_contract" not in pending:
+                pending.append("evidence_contract")
+    endorsed = [field for field in present if field not in rejected and field not in pending]
     ledger.user_endorsement = UserEndorsementState(
         endorsed_fields=endorsed,
-        rejected_fields=rejected,
-        pending_fields=missing,
-        last_signal=(ledger.expressed_query or ledger.user_request or None),
+        rejected_fields=sorted(set(rejected)),
+        pending_fields=sorted(set(pending)),
+        last_signal=latest_signal.note
+        if latest_signal and latest_signal.note
+        else latest_signal.action
+        if latest_signal
+        else (ledger.expressed_query or ledger.user_request or None),
     )
 
 
 def build_game_states(ledger: SpecLedger) -> list[GameStageState]:
     material_missing = [field for field in MATERIAL_FIELDS if not getattr(ledger, field)]
+    latest_alignment = ledger.alignment_signals[-1] if ledger.alignment_signals else None
+    alignment_blocks = [
+        field
+        for field in ledger.user_endorsement.pending_fields
+        if field in {"latent_task", "evidence_contract"}
+    ]
     required_search = [item for item in ledger.search_plan if item.required]
     unsatisfied_search = [item.purpose for item in required_search if item.status != "satisfied"]
     high_findings = [item.message for item in ledger.verification_findings if item.severity == "high"]
@@ -815,6 +861,16 @@ def build_game_states(ledger: SpecLedger) -> list[GameStageState]:
             success_condition="Goal, audience, format, constraints, and proof obligations are committed.",
             status="satisfied" if ledger.commitments and not material_missing else "active",
             blocking_conditions=material_missing,
+        ),
+        GameStageState(
+            stage_id="mutual_alignment",
+            game_type="iterated_belief_update_game",
+            objective="Let the user endorse, correct, or demand evidence for the inferred theta and shared spec.",
+            success_condition="The current inferred latent task is endorsed or corrected into the next shared spec.",
+            status="satisfied"
+            if latest_alignment and latest_alignment.action == "endorse"
+            else "active",
+            blocking_conditions=alignment_blocks,
         ),
         GameStageState(
             stage_id="retrieval",
@@ -1742,6 +1798,7 @@ def compute_spec_convergence(ledger: SpecLedger) -> SpecConvergenceState:
         status = "diverged"
     elif (
         overall >= 0.92
+        and endorsement == 1.0
         and verification == 1.0
         and human_review == 1.0
         and ledger.decision_gate != "needs_more_info"
@@ -1822,6 +1879,64 @@ def apply_clarification_answer(ledger: SpecLedger, answer: str | dict[str, Any])
         infer_spec_fields(ledger, text, fill_only=True)
     ledger.ambiguities = detect_material_ambiguities(ledger)
     ledger.status = "retrieving" if not ledger.ambiguities else "clarifying"
+    update_mutual_spec_game_state(ledger)
+    return ledger
+
+
+def apply_alignment_signal(
+    ledger: SpecLedger,
+    *,
+    action: str,
+    note: str = "",
+    fields: list[str] | None = None,
+) -> SpecLedger:
+    normalized_action = action.strip().lower()
+    if normalized_action not in {"endorse", "correct", "request_evidence"}:
+        raise ValueError(f"unsupported alignment action: {action}")
+    normalized_fields = fields or ["latent_task", "evidence_contract"]
+    signal = AlignmentSignal(
+        action=normalized_action,  # type: ignore[arg-type]
+        fields=normalized_fields,
+        note=note.strip(),
+    )
+    ledger.alignment_signals.append(signal)
+    if signal.note:
+        ledger.clarification_answers.append(f"alignment:{signal.action}: {signal.note}")
+
+    if signal.action == "correct":
+        if signal.note:
+            infer_spec_fields(ledger, signal.note, fill_only=False)
+        if not any(item.field == "latent_task" for item in ledger.ambiguities):
+            ledger.ambiguities.append(
+                Ambiguity(
+                    field="latent_task",
+                    severity="high",
+                    impact="The user corrected the inferred hidden task, so theta must be revised before finalizing.",
+                    question="Confirm the revised latent task and output contract.",
+                )
+            )
+        ledger.decision_gate = "needs_more_info"
+        ledger.status = "clarifying"
+    elif signal.action == "request_evidence":
+        for item in ledger.search_plan:
+            item.required = True
+            if item.status == "satisfied":
+                continue
+            item.status = "planned"
+        add_unique(
+            ledger.verification_conditions,
+            "User requested evidence before accepting the inferred latent task or decision frame.",
+        )
+        ledger.decision_gate = "needs_more_info"
+        ledger.status = "retrieving"
+    elif signal.action == "endorse":
+        add_unique(
+            ledger.verification_conditions,
+            "User endorsed the current inferred latent task and shared specification.",
+        )
+        if not ledger.ambiguities and ledger.decision_gate != "needs_more_info":
+            ledger.status = "finalized"
+
     update_mutual_spec_game_state(ledger)
     return ledger
 
