@@ -39,4 +39,16 @@ if [[ -f "${INGEST_DIR}/user_talks_chunks.jsonl" ]]; then
   gcloud storage cp "${INGEST_DIR}/user_talks_chunks.jsonl" "gs://${BUCKET}/user_talks_chunks.jsonl"
 fi
 
+if [[ -f "${INGEST_DIR}/strategy_documents.jsonl" ]]; then
+  gcloud storage cp "${INGEST_DIR}/strategy_documents.jsonl" "gs://${BUCKET}/strategy_documents.jsonl"
+fi
+
+if [[ -f "${INGEST_DIR}/strategy_chunks.jsonl" ]]; then
+  gcloud storage cp "${INGEST_DIR}/strategy_chunks.jsonl" "gs://${BUCKET}/strategy_chunks.jsonl"
+fi
+
+if [[ -f "${INGEST_DIR}/strategy_manifest.json" ]]; then
+  gcloud storage cp "${INGEST_DIR}/strategy_manifest.json" "gs://${BUCKET}/strategy_manifest.json"
+fi
+
 gcloud storage ls -l "gs://${BUCKET}"

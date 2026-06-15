@@ -119,10 +119,12 @@ def default_documents() -> list[str]:
         return [
             f"gs://{bucket}/documents.jsonl",
             f"gs://{bucket}/user_talks_documents.jsonl",
+            f"gs://{bucket}/strategy_documents.jsonl",
         ]
     return [
         "data/spanner_rag_ingest/documents.jsonl",
         "data/spanner_rag_ingest/user_talks_documents.jsonl",
+        "data/spanner_rag_ingest/strategy_documents.jsonl",
     ]
 
 
@@ -132,10 +134,12 @@ def default_chunks() -> list[str]:
         return [
             f"gs://{bucket}/chunks.jsonl",
             f"gs://{bucket}/user_talks_chunks.jsonl",
+            f"gs://{bucket}/strategy_chunks.jsonl",
         ]
     return [
         "data/spanner_rag_ingest/chunks.jsonl",
         "data/spanner_rag_ingest/user_talks_chunks.jsonl",
+        "data/spanner_rag_ingest/strategy_chunks.jsonl",
     ]
 
 

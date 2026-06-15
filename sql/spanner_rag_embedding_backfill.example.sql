@@ -3,6 +3,8 @@
 -- Replace PROJECT_ID, LOCATION, and MODEL_ID before running. Use this after
 -- RagChunks has been loaded. For 1M+ chunks, prefer an explicit batch worker
 -- or partitioned DML over one giant UPDATE.
+-- The vector index requires a Cloud Spanner Enterprise or Enterprise Plus
+-- instance.
 
 CREATE MODEL RagEmbeddingModel
 INPUT(

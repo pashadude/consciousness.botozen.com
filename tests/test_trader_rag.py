@@ -374,6 +374,23 @@ def test_spanner_rag_filters_irrelevant_chunks_for_ho_rb_spread() -> None:
     assert {"heating oil", "rbob"}.issubset(set(evidence[0].relevance_reasons))
 
 
+def test_relevance_accepts_strategy_language_for_ho_rb_arb() -> None:
+    query = "look at HO/RB arb and give me risk on this spread"
+    strategy = SearchEvidence(
+        evidence_id="spanner:strategy",
+        title="HO/RB crack spread arbitrage strategy",
+        url="spanner://strategy",
+        summary="Heating oil and RBOB gasoline spread rules with crack-spread risk triggers.",
+        query=query,
+        source="spanner_rag",
+    )
+
+    score, reasons = evidence_relevance(strategy, query)
+
+    assert score >= 4.0
+    assert {"heating oil", "rbob", "arb", "spread"}.issubset(set(reasons))
+
+
 def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:
     def fake_query_spanner_chunks(query, *, config, limit):
         return [

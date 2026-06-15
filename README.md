@@ -412,6 +412,48 @@ data/spanner_rag_ingest/manifest.json
 These generated files are ignored by git because the current corpus is multiple
 gigabytes.
 
+### Ingest Commodity Strategies
+
+News alone is not enough for trader RAG. Strategy rules, formulas, code
+standards, and trader research playbooks are converted separately:
+
+```bash
+uv run python scripts/prepare_strategy_rag_json.py \
+  --out-dir data/spanner_rag_ingest
+```
+
+The converter reads:
+
+- `/Users/pauldudko/VSProjects/commodity_signal/ShinkaEvolve/shinka/examples/oil_improm/quantpedia_commodities_strategies/quantpedia.com/strategies`
+- `/Users/pauldudko/Downloads/agents/commodity-strategist.md`
+- `/Users/pauldudko/Downloads/agents/commodity-researcher.md`
+- `/Users/pauldudko/Downloads/agents/brent-strategist.md`
+
+It writes:
+
+```text
+data/spanner_rag_ingest/strategy_documents.jsonl
+data/spanner_rag_ingest/strategy_chunks.jsonl
+data/spanner_rag_ingest/strategy_manifest.json
+```
+
+Load only the strategy corpus without reloading the multi-GB news corpus:
+
+```bash
+gcloud storage cp data/spanner_rag_ingest/strategy_documents.jsonl \
+  gs://zenpulsar-spanner-rag-ingest/strategy_documents.jsonl
+gcloud storage cp data/spanner_rag_ingest/strategy_chunks.jsonl \
+  gs://zenpulsar-spanner-rag-ingest/strategy_chunks.jsonl
+gcloud storage cp data/spanner_rag_ingest/strategy_manifest.json \
+  gs://zenpulsar-spanner-rag-ingest/strategy_manifest.json
+
+gcloud run jobs execute mutual-spec-spanner-rag-load \
+  --region=us-central1 \
+  --project=zenpulsar \
+  --args=--documents=gs://zenpulsar-spanner-rag-ingest/strategy_documents.jsonl,--chunks=gs://zenpulsar-spanner-rag-ingest/strategy_chunks.jsonl,--batch-size=250,--progress-every=250 \
+  --wait
+```
+
 Create the Spanner resources:
 
 ```bash
@@ -422,11 +464,22 @@ gcloud spanner instances create commodity-rag \
   --project zenpulsar \
   --config=regional-us-central1 \
   --description="Commodity RAG corpus" \
-  --processing-units=100
+  --processing-units=100 \
+  --edition=ENTERPRISE
 
 gcloud spanner databases create trader_rag \
   --project zenpulsar \
   --instance commodity-rag
+```
+
+If the instance already exists as Standard edition, corpus storage and lexical
+fallback search work, but full-text/vector hybrid indexes do not. Upgrade before
+running `sql/spanner_rag_search_indexes.example.sql`:
+
+```bash
+gcloud spanner instances update commodity-rag \
+  --project=zenpulsar \
+  --edition=ENTERPRISE
 ```
 
 Apply the schema in [sql/spanner_rag_schema.example.sql](sql/spanner_rag_schema.example.sql).

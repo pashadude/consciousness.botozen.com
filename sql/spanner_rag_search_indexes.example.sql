@@ -1,4 +1,5 @@
 -- Add full-text search columns and indexes after the bulk JSONL load.
+-- Requires a Cloud Spanner Enterprise or Enterprise Plus instance.
 
 ALTER TABLE RagDocuments ADD COLUMN TextTokens TOKENLIST
   AS (TOKENIZE_FULLTEXT(TextForEmbedding, content_type=>"text/plain")) HIDDEN;

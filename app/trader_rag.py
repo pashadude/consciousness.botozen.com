@@ -75,13 +75,20 @@ RELEVANCE_STOP_TERMS = {
     "verification",
 }
 HIGH_VALUE_RELEVANCE_TERMS = {
+    "arb",
+    "arbitrage",
     "aluminum",
     "aluminium",
     "ammonia",
     "basra",
     "brent",
+    "brent wti",
+    "calendar spread",
+    "carry",
     "cfr",
     "copper",
+    "crack",
+    "crack spread",
     "dap",
     "diesel",
     "ercot",
@@ -89,6 +96,7 @@ HIGH_VALUE_RELEVANCE_TERMS = {
     "fob",
     "freight",
     "gasoline",
+    "heating oil",
     "iraq",
     "jkm",
     "lng",
@@ -97,6 +105,8 @@ HIGH_VALUE_RELEVANCE_TERMS = {
     "pjm",
     "potash",
     "rbob",
+    "spread",
+    "term structure",
     "sugar",
     "sulfur",
     "sulphur",
@@ -105,6 +115,7 @@ HIGH_VALUE_RELEVANCE_TERMS = {
     "urea",
     "umm qasr",
     "wti",
+    "wti brent",
 }
 
 
@@ -720,12 +731,19 @@ def evidence_relevance(item: SearchEvidence, query: str) -> tuple[float, list[st
 
 
 def evidence_relevance_terms(query: str) -> list[str]:
-    phrases = re.findall(r'"([^"]{3,80})"', query.lower())
-    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", query.lower())
+    lower_query = query.lower()
+    phrases = re.findall(r'"([^"]{2,80})"', lower_query)
+    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{1,}", lower_query)
     terms: list[str] = []
+    if "ho/rb" in lower_query or "ho rb" in lower_query:
+        terms.extend(["heating oil", "rbob", "spread"])
     for value in [*phrases, *tokens]:
         normalized = " ".join(value.split()).strip(" .,:;")
         normalized = normalize_relevance_text(normalized)
+        if normalized == "ho":
+            normalized = "heating oil"
+        elif normalized == "rb":
+            normalized = "rbob"
         if (
             not normalized
             or normalized in RELEVANCE_STOP_TERMS
