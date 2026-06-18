@@ -8,7 +8,7 @@ from app.trader_rag import TraderRagResult
 
 
 def test_console_home_renders_multimodal_operator_surface(monkeypatch) -> None:
-    def fail_rag(*args, **kwargs):  # noqa: ANN002, ANN003
+    def fail_rag(*args, **kwargs):
         raise AssertionError("home page must not run RAG")
 
     monkeypatch.setattr(console_module, "run_trader_rag", fail_rag)
@@ -27,7 +27,7 @@ def test_console_home_renders_multimodal_operator_surface(monkeypatch) -> None:
 
 
 def test_console_deep_retrieval_defers_before_rag(tmp_path, monkeypatch) -> None:
-    def fail_rag(*args, **kwargs):  # noqa: ANN002, ANN003
+    def fail_rag(*args, **kwargs):
         raise AssertionError("high-risk deep retrieval should be deferred")
 
     monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path / "uploads"))
@@ -64,7 +64,7 @@ def test_console_deep_retrieval_defers_before_rag(tmp_path, monkeypatch) -> None
 def test_console_sync_rag_uses_fast_provider_limits(tmp_path, monkeypatch) -> None:
     captured_env: dict[str, str] = {}
 
-    def fake_rag(text, *, env, search_plan):  # noqa: ANN001
+    def fake_rag(text, *, env, search_plan):
         captured_env.update(env)
         return TraderRagResult(
             provider=env["TRADER_RAG_PROVIDER"],
