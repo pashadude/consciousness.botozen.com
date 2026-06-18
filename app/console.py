@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Body, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.cli_dashboard import (
@@ -42,6 +42,7 @@ from app.router import (
 from app.spec_state import (
     ArtifactRef,
     HumanReviewState,
+    SearchPlanItem,
     SpecLedger,
     add_evidence_from_artifacts,
     add_route,
@@ -92,14 +93,15 @@ def health() -> dict[str, str]:
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return render_page(
-        text=DEFAULT_CONSOLE_TEXT,
-        result=build_console_result(DEFAULT_CONSOLE_TEXT, [], ""),
+        text="",
+        result=build_initial_console_result(),
         env=os.environ,
     )
 
 
 @app.post("/spec", response_class=HTMLResponse)
 async def create_spec(
+    background_tasks: BackgroundTasks,
     query: str = QUERY_FORM,
     speech_text: str = SPEECH_TEXT_FORM,
     files: list[UploadFile] | None = FILES_FORM,
@@ -107,7 +109,8 @@ async def create_spec(
     artifacts = await save_uploads(files or [])
     text = combine_query_and_speech(query, speech_text, bool(artifacts))
     result = build_console_result(text, artifacts, speech_text)
-    persist_console_talk(
+    background_tasks.add_task(
+        persist_console_talk,
         result=result,
         raw_text=text,
         speech_text=speech_text,
@@ -118,6 +121,7 @@ async def create_spec(
 
 @app.post("/api/spec")
 async def create_spec_json(
+    background_tasks: BackgroundTasks,
     query: str = QUERY_FORM,
     speech_text: str = SPEECH_TEXT_FORM,
     files: list[UploadFile] | None = FILES_FORM,
@@ -125,7 +129,8 @@ async def create_spec_json(
     artifacts = await save_uploads(files or [])
     text = combine_query_and_speech(query, speech_text, bool(artifacts))
     result = build_console_result(text, artifacts, speech_text)
-    persist_console_talk(
+    background_tasks.add_task(
+        persist_console_talk,
         result=result,
         raw_text=text,
         speech_text=speech_text,
@@ -180,6 +185,7 @@ async def create_spec_json(
 
 @app.post("/api/human-review")
 async def human_review_json(
+    background_tasks: BackgroundTasks,
     payload: dict = JSON_BODY,
     x_operator_review_token: str | None = OPERATOR_REVIEW_TOKEN_HEADER,
 ) -> JSONResponse:
@@ -198,7 +204,8 @@ async def human_review_json(
     message = apply_operator_review(ledger, action=action, note=note, operator=operator)
     update_mutual_spec_game_state(ledger)
     append_human_review_log(ledger, action=action, note=note, operator=operator, message=message)
-    persist_human_review_talk(
+    background_tasks.add_task(
+        persist_human_review_talk,
         ledger=ledger,
         action=action,
         note=note,
@@ -220,7 +227,7 @@ async def human_review_json(
 
 
 @app.post("/api/alignment")
-async def alignment_json(payload: dict = JSON_BODY) -> JSONResponse:
+async def alignment_json(background_tasks: BackgroundTasks, payload: dict = JSON_BODY) -> JSONResponse:
     ledger_payload = payload.get("ledger")
     if not isinstance(ledger_payload, dict):
         raise HTTPException(status_code=400, detail="ledger payload is required")
@@ -234,7 +241,8 @@ async def alignment_json(payload: dict = JSON_BODY) -> JSONResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     message = alignment_message(action, ledger)
-    persist_alignment_talk(
+    background_tasks.add_task(
+        persist_alignment_talk,
         ledger=ledger,
         action=action,
         note=note,
@@ -266,7 +274,7 @@ def build_console_result(
     update_ledger_from_user_text(ledger, text, artifact_refs=artifacts)
     market_math = build_market_math_frame(text)
     attach_user_market_marks(ledger, market_math)
-    for stage in ("ingest", "hypothesize_spec", "retrieve_evidence"):
+    for stage in ("ingest", "hypothesize_spec"):
         record_stage(ledger, stage)
         add_route(ledger, route_for_stage(stage, ledger))
     if speech_text.strip():
@@ -277,13 +285,31 @@ def build_console_result(
         if artifact.mime_type and artifact.mime_type.startswith("image/"):
             ledger.verification_conditions.append("If image content is material, inspect or embed it before finalizing visual claims.")
     add_evidence_from_artifacts(ledger)
-    rag_result = run_trader_rag(
-        text,
-        env=os.environ,
-        search_plan=ledger.search_plan,
-    )
-    apply_rag_to_ledger(ledger, rag_result)
     formalize_ledger(ledger)
+    route_decision = route_async_decision(
+        ledger,
+        mcp_configured=configured_mcp(os.environ),
+        telemetry_enabled=flag_enabled("RESOURCE_REGION_DOMINATION_ENABLED"),
+        artifact_count=len(artifacts),
+    )
+    record_stage(ledger, "retrieve_evidence")
+    add_route(ledger, route_for_stage("retrieve_evidence", ledger))
+    if should_defer_deep_retrieval(route_decision, os.environ):
+        rag_result = deferred_rag_result(
+            text,
+            env=os.environ,
+            search_plan=ledger.search_plan,
+            route_decision=route_decision,
+        )
+        if async_jobs_enabled():
+            enqueue_async_job(ledger, route_decision)
+    else:
+        rag_result = run_trader_rag(
+            text,
+            env=console_sync_rag_env(os.environ),
+            search_plan=ledger.search_plan,
+        )
+    apply_rag_to_ledger(ledger, rag_result)
     record_stage(ledger, "draft_output")
     add_route(ledger, route_for_stage("draft_output", ledger))
     draft = build_draft_from_ledger(ledger)
@@ -292,15 +318,17 @@ def build_console_result(
     verification = verify_draft(ledger, draft)
     ledger.verification_findings = verification.findings
     update_mutual_spec_game_state(ledger)
-    route_decision = route_async_decision(
-        ledger,
-        mcp_configured=configured_mcp(os.environ),
-        telemetry_enabled=flag_enabled("RESOURCE_REGION_DOMINATION_ENABLED"),
-        artifact_count=len(artifacts),
-        failed_verification=not verification.passed,
-    )
+    if not route_decision.should_enqueue:
+        route_decision = route_async_decision(
+            ledger,
+            mcp_configured=configured_mcp(os.environ),
+            telemetry_enabled=flag_enabled("RESOURCE_REGION_DOMINATION_ENABLED"),
+            artifact_count=len(artifacts),
+            failed_verification=not verification.passed,
+        )
     if route_decision.should_enqueue and async_jobs_enabled():
-        enqueue_async_job(ledger, route_decision)
+        if not ledger.async_jobs:
+            enqueue_async_job(ledger, route_decision)
         ledger.status = "async_pending"
     else:
         ledger.status = (
@@ -325,6 +353,124 @@ def build_console_result(
         rag_result=rag_result,
         market_math=market_math,
     )
+
+
+def build_initial_console_result() -> ConsoleResult:
+    ledger = SpecLedger(status="clarifying")
+    update_mutual_spec_game_state(ledger)
+    route_decision = route_async_decision(
+        ledger,
+        mcp_configured=configured_mcp(os.environ),
+        telemetry_enabled=flag_enabled("RESOURCE_REGION_DOMINATION_ENABLED"),
+        artifact_count=0,
+    )
+    candidates = sample_route_candidates(os.environ)
+    return ConsoleResult(
+        ledger=ledger,
+        draft="",
+        verification_passed=False,
+        route_decision=route_decision,
+        candidates=candidates,
+        frontier_keys={candidate.key for candidate in nondominated_candidates(candidates)},
+        artifact_count=0,
+        rag_result=TraderRagResult(
+            provider=os.environ.get("TRADER_RAG_PROVIDER", "disabled"),
+            status="not_applicable",
+            queries=[],
+            required_evidence=[],
+            warnings=["Submit a query to run the source layer."],
+        ),
+        market_math=None,
+    )
+
+
+def should_defer_deep_retrieval(
+    route_decision: object,
+    env: Mapping[str, str],
+) -> bool:
+    if not async_jobs_enabled():
+        return False
+    if not flag_enabled_in_env(env, "CONSOLE_DEEP_RETRIEVAL_ASYNC", default=True):
+        return False
+    if not getattr(route_decision, "should_enqueue", False):
+        return False
+    providers = configured_provider_names(env)
+    return (
+        configured_mcp(env)
+        or "mcp" in providers
+        or "vertex_ai_search" in providers
+        or "google_agent_search" in providers
+    )
+
+
+def deferred_rag_result(
+    text: str,
+    *,
+    env: Mapping[str, str],
+    search_plan: list[SearchPlanItem],
+    route_decision: object,
+) -> TraderRagResult:
+    queries = [item.query for item in search_plan if item.required]
+    required_evidence = [item.purpose for item in search_plan if item.required]
+    reasons = list(getattr(route_decision, "reasons", []))
+    job_kind = str(getattr(route_decision, "job_kind", "deep_research_and_verification"))
+    warnings = [
+        "Deep retrieval was deferred to a background route to keep the operator response interactive.",
+        f"Queued route: {job_kind}.",
+    ]
+    if reasons:
+        warnings.append("Route reasons: " + ", ".join(reasons[:6]) + ".")
+    return TraderRagResult(
+        provider=env.get("TRADER_RAG_PROVIDER", "disabled"),
+        status="deferred",
+        queries=queries or [text],
+        required_evidence=required_evidence,
+        warnings=warnings,
+    )
+
+
+def console_sync_rag_env(env: Mapping[str, str]) -> dict[str, str]:
+    sync_env = dict(env)
+    if not flag_enabled_in_env(env, "CONSOLE_FAST_RAG_ENABLED", default=True):
+        return sync_env
+
+    providers = configured_provider_names(env)
+    provider = (env.get("CONSOLE_SYNC_RAG_PROVIDER") or "").strip().lower()
+    if not provider:
+        if "spanner_rag" in providers:
+            provider = "spanner_rag"
+        elif "google_cse" in providers:
+            provider = "google_cse"
+        elif "fixture" in providers:
+            provider = "fixture"
+        elif "mcp" in providers:
+            provider = "mcp"
+        elif providers:
+            provider = next(iter(providers))
+
+    if provider:
+        sync_env["TRADER_RAG_PROVIDER"] = provider
+    sync_env["TRADER_RAG_MAX_QUERIES"] = env.get("CONSOLE_SYNC_RAG_MAX_QUERIES", "1")
+    sync_env["TRADER_RAG_MAX_RESULTS"] = env.get("CONSOLE_SYNC_RAG_MAX_RESULTS", "3")
+    sync_env["TRADER_RAG_TIMEOUT_SECONDS"] = env.get(
+        "CONSOLE_SYNC_RAG_TIMEOUT_SECONDS",
+        "2.5",
+    )
+    if sync_env.get("TRADER_RAG_PROVIDER") == "spanner_rag":
+        sync_env["SPANNER_RAG_SEARCH_MODE"] = env.get(
+            "CONSOLE_SYNC_SPANNER_RAG_SEARCH_MODE",
+            "semantic",
+        )
+    return sync_env
+
+
+def configured_provider_names(env: Mapping[str, str]) -> set[str]:
+    raw = env.get("TRADER_RAG_PROVIDER", "disabled")
+    return {
+        item.strip().lower()
+        for item in re.split(r"[,;+]", raw)
+        if item.strip() and item.strip().lower() not in {"disabled", "none", "off"}
+    }
 
 
 async def save_uploads(files: list[UploadFile]) -> list[ArtifactRef]:
@@ -580,6 +726,8 @@ def build_operator_route_steps(result: ConsoleResult) -> list[tuple[int, str, st
     source_class = source_status_class(source_status)
     if source_status in {"retrieved", "empty"}:
         source_label = "Complete" if source_status == "retrieved" else "No cited source found"
+    elif source_status == "deferred":
+        source_label = "Deferred"
     elif source_status in {"missing_config", "provider_error"}:
         source_label = "Blocked"
     else:
@@ -683,6 +831,8 @@ def render_model_handoff_plan(result: ConsoleResult) -> str:
 
 
 def model_execution_mode(stage: str, result: ConsoleResult) -> str:
+    if stage == "retrieve_evidence" and result.rag_result.status == "deferred":
+        return "background retrieval queued"
     if stage == "retrieve_evidence" and result.rag_result.status == "retrieved":
         return "tool/RAG retrieval executed"
     if stage == "verify":
@@ -1695,6 +1845,18 @@ def flag_enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def flag_enabled_in_env(
+    env: Mapping[str, str],
+    name: str,
+    *,
+    default: bool = False,
+) -> bool:
+    value = env.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def configured_mcp(env: Mapping[str, str]) -> bool:
     remote = env.get("MCP_RESEARCH_URL")
     command = env.get("MCP_RESEARCH_COMMAND")
@@ -1772,6 +1934,7 @@ def readable_state(value: str) -> str:
         "blocked": "blocked",
         "clarifying": "needs user clarification",
         "configured": "configured",
+        "deferred": "deferred to background",
         "empty": "no evidence returned",
         "finalized": "finalized",
         "go": "go-ready",
@@ -1838,6 +2001,7 @@ def source_status_class(status: str) -> str:
     return {
         "retrieved": "verified",
         "configured": "running",
+        "deferred": "async",
         "planned": "clarify",
         "missing_config": "blocked",
         "provider_error": "blocked",

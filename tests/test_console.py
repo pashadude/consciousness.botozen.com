@@ -2,10 +2,16 @@ import json
 
 from fastapi.testclient import TestClient
 
+import app.console as console_module
 from app.console import app
+from app.trader_rag import TraderRagResult
 
 
-def test_console_home_renders_multimodal_operator_surface() -> None:
+def test_console_home_renders_multimodal_operator_surface(monkeypatch) -> None:
+    def fail_rag(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("home page must not run RAG")
+
+    monkeypatch.setattr(console_module, "run_trader_rag", fail_rag)
     client = TestClient(app)
 
     response = client.get("/")
@@ -18,6 +24,82 @@ def test_console_home_renders_multimodal_operator_surface() -> None:
     assert "Alignment Loop" in response.text
     assert "Model Handoff Plan" in response.text
     assert "Model-Region Frontier" in response.text
+
+
+def test_console_deep_retrieval_defers_before_rag(tmp_path, monkeypatch) -> None:
+    def fail_rag(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("high-risk deep retrieval should be deferred")
+
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("ASYNC_JOB_ENABLED", "true")
+    monkeypatch.setenv("ASYNC_JOB_STORE_PATH", str(tmp_path / "jobs.jsonl"))
+    monkeypatch.setenv("TRADER_RAG_PROVIDER", "spanner_rag,mcp")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "zenpulsar")
+    monkeypatch.setenv("SPANNER_RAG_INSTANCE_ID", "commodity-rag")
+    monkeypatch.setenv("SPANNER_RAG_DATABASE_ID", "trader_rag")
+    monkeypatch.setenv("MCP_RESEARCH_COMMAND", "python -m opoint_mcp.server")
+    monkeypatch.setenv("OPOINT_API_KEY", "test-key")
+    monkeypatch.setattr(console_module, "run_trader_rag", fail_rag)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/spec",
+        data={
+            "query": (
+                "Look i have an offer of 50000 tonns of sulfur in Iraq, "
+                "Umm Qasr, fob 550, should i go for it?"
+            )
+        },
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["route_decision"]["mode"] == "async"
+    assert payload["ledger"]["status"] == "async_pending"
+    assert payload["source_layer"]["status"] == "deferred"
+    assert payload["ledger"]["async_jobs"]
+    assert (tmp_path / "jobs.jsonl").exists()
+
+
+def test_console_sync_rag_uses_fast_provider_limits(tmp_path, monkeypatch) -> None:
+    captured_env: dict[str, str] = {}
+
+    def fake_rag(text, *, env, search_plan):  # noqa: ANN001
+        captured_env.update(env)
+        return TraderRagResult(
+            provider=env["TRADER_RAG_PROVIDER"],
+            status="empty",
+            queries=["commodity offer market price benchmark"],
+            required_evidence=[],
+        )
+
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setenv("ASYNC_JOB_ENABLED", "false")
+    monkeypatch.setenv("TRADER_RAG_PROVIDER", "spanner_rag,mcp")
+    monkeypatch.delenv("CONSOLE_SYNC_RAG_PROVIDER", raising=False)
+    monkeypatch.delenv("CONSOLE_SYNC_RAG_MAX_QUERIES", raising=False)
+    monkeypatch.delenv("CONSOLE_SYNC_RAG_MAX_RESULTS", raising=False)
+    monkeypatch.delenv("CONSOLE_SYNC_RAG_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("CONSOLE_SYNC_SPANNER_RAG_SEARCH_MODE", raising=False)
+    monkeypatch.setattr(console_module, "run_trader_rag", fake_rag)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/spec",
+        data={
+            "query": (
+                "Look i have an offer of 50000 tonns of sulfur in Iraq, "
+                "Umm Qasr, fob 550, should i go for it?"
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured_env["TRADER_RAG_PROVIDER"] == "spanner_rag"
+    assert captured_env["TRADER_RAG_MAX_QUERIES"] == "1"
+    assert captured_env["TRADER_RAG_MAX_RESULTS"] == "3"
+    assert captured_env["TRADER_RAG_TIMEOUT_SECONDS"] == "2.5"
+    assert captured_env["SPANNER_RAG_SEARCH_MODE"] == "semantic"
 
 
 def test_console_post_records_image_artifact(tmp_path, monkeypatch) -> None:

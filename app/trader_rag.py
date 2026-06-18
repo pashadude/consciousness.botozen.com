@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -457,10 +458,19 @@ def run_multi_provider(
     *,
     config: TraderSourceConfig,
 ) -> TraderRagResult:
-    results = [
-        run_single_provider(provider, queries, required_evidence, config=config)
-        for provider in providers
-    ]
+    workers = max(1, min(len(providers), 4))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(
+            executor.map(
+                lambda provider: run_single_provider(
+                    provider,
+                    queries,
+                    required_evidence,
+                    config=config,
+                ),
+                providers,
+            )
+        )
     evidence = dedupe_evidence(
         filter_evidence_for_queries(
             [item for result in results for item in result.evidence],
@@ -1686,6 +1696,8 @@ def source_type_for_provider(provider: str) -> str:
 def status_for_rag(rag: TraderRagResult) -> str:
     if rag.status in {"retrieved", "configured"}:
         return "retrieved" if rag.evidence else "configured"
+    if rag.status == "deferred":
+        return "planned"
     if rag.status in {"provider_error", "missing_config"}:
         return "missing_config"
     if rag.status in {"empty", "failed"}:
