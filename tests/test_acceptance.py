@@ -188,6 +188,32 @@ def test_physical_commodity_offer_builds_trader_decision_frame() -> None:
     assert ledger.skill_compatibility.compatibility_risks
 
 
+def test_predeal_sulfur_negotiation_is_not_treated_as_executable_cargo_gate() -> None:
+    ledger = SpecLedger()
+    update_ledger_from_user_text(
+        ledger,
+        (
+            "I would like to sell 20000 mt of Kazakh sulfur to Nitron. Logistics is theirs. "
+            "They tend to buy time as Hormuz situation is unclear. Nitron already has 400000 MT "
+            "sulphur locked in Iraq. Attached document provides sulphur specifications. "
+            "Deal is on planning stage, no LOI even to the seller which works with the factory in Pavlodar. "
+            "My goal is to convince Nitron to start official negotiations on the deal."
+        ),
+    )
+
+    assert ledger.audience == "Nitron commercial buyer"
+    assert ledger.output_format == "negotiation brief"
+    assert "official negotiations" in ledger.goal
+    assert ledger.decision_gate == "analysis_ready"
+    assert not ledger.human_review.required
+    assert all(not item.required for item in ledger.search_plan)
+    assert any("Nitron" in item.query for item in ledger.search_plan)
+    assert any("Kazakhstan" in item.query or "Pavlodar" in item.query for item in ledger.search_plan)
+    assert not any("Umm Qasr" in item.query for item in ledger.search_plan)
+    assert any("negotiation asks" in item for item in ledger.evidence_contract)
+    assert any("not blockers" in item for item in ledger.success_criteria)
+
+
 def test_mutual_spec_game_state_is_materialized_from_query() -> None:
     ledger = SpecLedger()
     update_ledger_from_user_text(

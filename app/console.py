@@ -56,6 +56,7 @@ from app.spec_state import (
     add_evidence_from_artifacts,
     add_route,
     apply_alignment_signal,
+    is_predeal_negotiation_query,
     record_stage,
     run_lean_formal_proofs,
     update_ledger_from_user_text,
@@ -2038,6 +2039,8 @@ def build_provisional_answer(result: ConsoleResult) -> list[str]:
     answer: list[str] = []
     if result.market_math is not None and any(token in text for token in ("ho/rb", "rbob", "heating oil")):
         answer.extend(build_market_math_answer_lines(result))
+    elif is_predeal_negotiation_query(text):
+        answer.extend(build_predeal_negotiation_answer_lines(result))
     elif "sulfur" in text or "sulphur" in text:
         answer.extend(
             [
@@ -2071,6 +2074,46 @@ def build_provisional_answer(result: ConsoleResult) -> list[str]:
             + "."
         )
     return answer
+
+
+def build_predeal_negotiation_answer_lines(result: ConsoleResult) -> list[str]:
+    text = (result.ledger.expressed_query or result.ledger.user_request).lower()
+    buyer = "Nitron" if "nitron" in text else "the buyer"
+    origin = "Kazakh/Pavlodar" if any(term in text for term in ("kazakh", "kazakhstan", "pavlodar")) else "the proposed origin"
+    quantity = "20,000 MT" if "20000" in text or "20,000" in text else "the proposed quantity"
+    lines = [
+        (
+            "Immediate answer: this is negotiation-ready, not deal-ready. "
+            f"The correct next move is to push {buyer} from informal chat into an official commercial discussion, "
+            "while explicitly saying no cargo is executable yet."
+        ),
+        (
+            f"Latent task: persuade {buyer} to evaluate {quantity} of {origin} sulfur as optional supply, "
+            "not to approve a trade, issue execution instructions, or bypass seller-side formalities."
+        ),
+        (
+            "Best framing: sell optionality and diversification. If Hormuz or Iraq timing is unclear, "
+            "do not pressure them with panic; position this as a low-commitment way to keep an alternative sulfur line warm."
+        ),
+        (
+            "Use your attached specification as the anchor: ask Nitron to confirm whether the sulfur spec is acceptable, "
+            "what destination/quality constraints matter, and what official document path they need before the seller/factory side is approached formally."
+        ),
+        (
+            "Suggested official ask: 'Can we move this from WhatsApp to an official email thread so your commercial/logistics team can review the spec, target price basis, delivery assumptions, and required documents?'"
+        ),
+        (
+            "Objection handling: if they are buying time because Iraq supply is already locked, ask for a small official review window rather than commitment: spec acceptance, target terms, and whether Kazakh origin is useful as backup supply."
+        ),
+        (
+            "Gate: do not call this a deal, LOI, or executable sale. Missing LOI, title chain, payment terms, and final logistics are next negotiation requests, not blockers to drafting the outreach."
+        ),
+    ]
+    if result.rag_result.evidence:
+        lines.append("Source layer: cited evidence is attached; use it only to support market/timing context, not to imply Nitron has committed.")
+    else:
+        lines.append("Source layer: no cited external evidence was retrieved; this brief relies on user-supplied counterparty context and attached specs, so factual market claims should stay qualified.")
+    return lines
 
 
 def build_market_math_answer_lines(result: ConsoleResult) -> list[str]:

@@ -510,7 +510,8 @@ def contains_trader_time_scope(
     return bool(
         re.search(
             r"\b(today|current|intraday|next\s+(?:day|week|month)|this\s+(?:week|month)|"
-            r"day|week|month|m1|q1|q2|q3|q4|prompt|spot|now)\b",
+            r"day|week|month|m1|q1|q2|q3|q4|prompt|spot|now|planning\s+stage|"
+            r"pre-?deal|official\s+negotiations?|no\s+loi)\b",
             text,
         )
     )

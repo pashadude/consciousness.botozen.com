@@ -336,6 +336,37 @@ def test_console_sulfur_offer_renders_fixture_source_evidence(tmp_path, monkeypa
     assert "retrieved search evidence is attached" in response.text
 
 
+def test_console_predeal_sulfur_negotiation_returns_negotiation_brief(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setenv("TRADER_RAG_PROVIDER", "disabled")
+    monkeypatch.setenv("ASYNC_JOB_ENABLED", "false")
+    client = TestClient(app)
+
+    query = (
+        "I would like to sell 20000 mt of Kazakh sulfur to Nitron. Logistics is theirs. "
+        "They tend to buy time as Hormuz situation is unclear. Nitron already has 400000 MT "
+        "sulphur locked in Iraq. Attached document provides sulphur specifications. "
+        "Deal is on planning stage, no LOI even to the seller which works with the factory in Pavlodar. "
+        "My goal is to convince Nitron to start official negotiations on the deal."
+    )
+    response = client.post("/api/spec", data={"query": query})
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["ledger"]["output_format"] == "negotiation brief"
+    assert payload["ledger"]["audience"] == "Nitron commercial buyer"
+    assert payload["ledger"]["decision_gate"] == "analysis_ready"
+    assert payload["human_review"]["required"] is False
+    assert all(not item["required"] for item in payload["ledger"]["search_plan"])
+    assert any("Nitron" in item["query"] for item in payload["ledger"]["search_plan"])
+    assert not any("Umm Qasr" in item["query"] for item in payload["ledger"]["search_plan"])
+    assert any("negotiation-ready, not deal-ready" in item for item in payload["provisional_answer"])
+    assert any("no cargo is executable yet" in item for item in payload["provisional_answer"])
+
+
 def test_console_operator_can_submit_human_review(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path / "uploads"))
     monkeypatch.setenv("HUMAN_REVIEW_LOG_PATH", str(tmp_path / "reviews.jsonl"))

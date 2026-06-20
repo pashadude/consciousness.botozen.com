@@ -9,6 +9,7 @@ from typing import Literal
 from app.spec_state import (
     RouteRecord,
     SpecLedger,
+    is_predeal_negotiation_query,
     looks_like_trader_query,
     needs_clarification,
 )
@@ -193,6 +194,11 @@ def async_jobs_enabled() -> bool:
 
 def is_execution_sensitive_trader_query(text: str) -> bool:
     lower = text.lower()
+    if is_predeal_negotiation_query(lower) and not any(
+        token in lower
+        for token in ("should i", "go for it", "accept", "execute", "order", "position")
+    ):
+        return False
     return any(
         token in lower
         for token in (

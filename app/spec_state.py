@@ -599,8 +599,46 @@ def infer_latent_type_beliefs(ledger: SpecLedger) -> list[LatentTypeBelief]:
                 "trader_decision_frame",
                 "Trader needs a proof-carrying decision frame rather than a direct answer.",
                 0.35,
-                matched_signals(text, ("trader", "trade", "risk", "spread", "offer", "fob")),
+                matched_signals(
+                    text,
+                    (
+                        "trader",
+                        "trade",
+                        "risk",
+                        "spread",
+                        "offer",
+                        "fob",
+                        "sell",
+                        "buyer",
+                        "nitron",
+                        "sulfur",
+                        "sulphur",
+                        "mt",
+                        "negotiation",
+                    ),
+                ),
                 "retrieve",
+            )
+        )
+    if is_predeal_negotiation_query(text):
+        candidates.append(
+            (
+                "predeal_counterparty_negotiation",
+                "User wants to convert an informal counterparty discussion into official negotiations, not approve or execute a cargo deal.",
+                0.5,
+                matched_signals(
+                    text,
+                    (
+                        "pre-deal",
+                        "pre deal",
+                        "planning stage",
+                        "no loi",
+                        "official negotiations",
+                        "convince",
+                        "nitron",
+                    ),
+                ),
+                "propose",
             )
         )
     if any(token in text for token in ("sulfur", "sulphur", "umm qasr", "fob", "ton", "offer")):
@@ -1062,6 +1100,11 @@ def sync_human_review_state(ledger: SpecLedger) -> None:
 
 def requires_human_review_for_query(text: str) -> bool:
     if not looks_like_trader_query(text):
+        return False
+    if is_predeal_negotiation_query(text) and not any(
+        token in text
+        for token in ("should i", "go for it", "accept", "execute", "order", "position")
+    ):
         return False
     decision_tokens = (
         "should i",
@@ -2108,18 +2151,36 @@ def infer_constraints(text: str) -> list[str]:
 def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     if not looks_like_trader_query(text):
         return
+    lower = text.lower()
+    predeal_negotiation = is_predeal_negotiation_query(lower)
     if not ledger.audience or looks_like_market_phrase(ledger.audience):
-        ledger.audience = "traders"
-    if not ledger.output_format:
-        ledger.output_format = "decision frame"
-    if not ledger.goal:
+        ledger.audience = (
+            "Nitron commercial buyer"
+            if predeal_negotiation and "nitron" in lower
+            else "traders"
+        )
+    if not ledger.output_format or predeal_negotiation:
+        ledger.output_format = (
+            "negotiation brief" if predeal_negotiation else "decision frame"
+        )
+    if predeal_negotiation:
+        ledger.goal = (
+            "Move the buyer from informal discussion to official negotiations for the "
+            "proposed sulfur supply, without representing the planning-stage opportunity "
+            "as an executable deal."
+        )
+    elif not ledger.goal:
         ledger.goal = "Reconstruct and verify the trading task specification from a compressed trader query."
 
     add_unique(
         ledger.latent_intent_hypotheses,
         "The trader may be asking for a trade, analysis, alert, or strategy spec rather than a direct answer.",
     )
-    lower = text.lower()
+    if predeal_negotiation:
+        add_unique(
+            ledger.latent_intent_hypotheses,
+            "Convert informal buyer interest into an official negotiation opening; seller LOI, title-chain, and payment documents are negotiation asks, not prerequisites for drafting the outreach frame.",
+        )
     if any(token in lower for token in ("arb", "arbitrage", "ho/rb", "rbob", "ulsd", "crack")):
         add_unique(ledger.latent_intent_hypotheses, "Check whether a physical or relative-value arbitrage exists.")
     if any(token in lower for token in ("turkey", "iraq", "umm qasr", "sanction", "legal", "counterparty", "cheating")):
@@ -2135,7 +2196,11 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
         "Commodity feeds must record freshness, entitlement, units, transform, confidence, and lookahead guard.",
         "Search/tool evidence must be retrieved through Google Agent SDK search tools, MCP/Opoint, Google CSE/RAG, Vertex AI Search, or explicitly marked model-only evidence before market claims are trusted.",
     ]
-    if is_physical_offer_query(lower):
+    if predeal_negotiation:
+        evidence_contracts.append(
+            "Pre-deal negotiation briefs may use user-supplied counterparty context and attached specifications to draft outreach; missing seller LOI, title chain, payment, and logistics documents must be listed as negotiation asks rather than blockers."
+        )
+    elif is_physical_offer_query(lower):
         evidence_contracts.append(
             "Physical commodity offers must verify product specification, quantity tolerance, Incoterms, load port, laycan, counterparty identity, title chain, payment terms, sanctions exposure, freight, insurance, inspection, and resale path."
         )
@@ -2154,10 +2219,16 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     ):
         add_unique(ledger.verification_conditions, item)
     if is_physical_offer_query(lower):
-        add_unique(
-            ledger.verification_conditions,
-            "For physical offers, do not mark go/no-go ready until product spec, documents, counterparty, payment, logistics, and market exit are verified.",
-        )
+        if predeal_negotiation:
+            add_unique(
+                ledger.verification_conditions,
+                "For pre-deal outreach, do not demand LOI, title chain, payment terms, or logistics documents before drafting; label them as next negotiation requests and do not claim the cargo is executable.",
+            )
+        else:
+            add_unique(
+                ledger.verification_conditions,
+                "For physical offers, do not mark go/no-go ready until product spec, documents, counterparty, payment, logistics, and market exit are verified.",
+            )
     if is_relative_value_spread_query(lower):
         add_unique(
             ledger.verification_conditions,
@@ -2170,11 +2241,20 @@ def infer_trader_decision_context(ledger: SpecLedger, text: str) -> None:
     ):
         add_unique(ledger.constraints, item)
 
-    for item in (
-        "Output includes interpreted thesis, missing information, risk ledger, assumptions, verification checklist, and falsification triggers.",
-        "Output is a proof-carrying decision frame that the trader can inspect and explain.",
-        "Output separates immediate answer, required verification, hidden risks, economics, logistics, and go/no-go gate.",
-    ):
+    criteria = (
+        (
+            "Output gives a buyer-specific negotiation opener, official next-step ask, objection handling, evidence/attachment checklist, and follow-up message.",
+            "Output separates user-supplied claims from verified facts and states that this is not an executable deal or buy/sell recommendation.",
+            "Output treats seller LOI, title chain, payment terms, logistics details, and final specs as negotiation asks, not blockers to starting official talks.",
+        )
+        if predeal_negotiation
+        else (
+            "Output includes interpreted thesis, missing information, risk ledger, assumptions, verification checklist, and falsification triggers.",
+            "Output is a proof-carrying decision frame that the trader can inspect and explain.",
+            "Output separates immediate answer, required verification, hidden risks, economics, logistics, and go/no-go gate.",
+        )
+    )
+    for item in criteria:
         add_unique(ledger.success_criteria, item)
     plan_trader_evidence_search(ledger, text)
 
@@ -2242,6 +2322,16 @@ def looks_like_trader_query(text: str) -> bool:
         "mutual specification",
         "specification game",
         "latent intent",
+        "kazakh",
+        "kazakhstan",
+        "pavlodar",
+        "nitron",
+        "hormuz",
+        "loi",
+        "negotiation",
+        "negotiations",
+        "whatsapp",
+        "linkedin",
     )
     return any(token in lower for token in trader_tokens)
 
@@ -2260,13 +2350,14 @@ def plan_trader_evidence_search(ledger: SpecLedger, text: str) -> SpecLedger:
     required = trader_required_evidence(lower)
     queries = trader_search_queries(lower)
     optional_live_search = is_relative_value_spread_query(lower) and has_user_supplied_market_marks(lower)
+    optional_predeal_evidence = is_predeal_negotiation_query(lower)
     for index, (query, purpose) in enumerate(zip(queries, required, strict=False), start=1):
         add_search_plan_item(
             ledger,
             query=query,
             purpose=purpose,
             query_id=f"trader:{stable_id(query)}:{index}",
-            required=not optional_live_search,
+            required=not optional_live_search and not optional_predeal_evidence,
         )
     if optional_live_search:
         add_search_plan_item(
@@ -2282,6 +2373,11 @@ def plan_trader_evidence_search(ledger: SpecLedger, text: str) -> SpecLedger:
         add_unique(
             ledger.verification_conditions,
             "Ask whether the user wants live source verification before calling external market/search tools; user-supplied marks support provisional math only.",
+        )
+    if optional_predeal_evidence:
+        add_unique(
+            ledger.verification_conditions,
+            "Pre-deal negotiation evidence search is advisory: empty retrieval should not block drafting a buyer outreach frame from user-supplied context and attached specifications.",
         )
     record_evidence_source(
         ledger,
@@ -2315,6 +2411,15 @@ def trader_required_evidence(lower_text: str) -> list[str]:
         "Sanctions, compliance, route, bankability, and political risk.",
         "Resale path, buyer demand, hedge/proxy availability, and netback economics.",
     ]
+    if is_predeal_negotiation_query(lower_text):
+        return [
+            "Buyer-specific negotiation context: Nitron role, existing sulfur exposure, timing pressure, and decision owner.",
+            "Kazakh/Pavlodar sulfur origin, availability, specification, quantity, and seller-factory chain as planning assumptions.",
+            "Attached sulfur specification and any WhatsApp/LinkedIn discussion details supplied by the user.",
+            "Current geopolitical/timing risk such as Hormuz uncertainty, framed as optionality rather than pressure.",
+            "Commercial negotiation ask: move from informal chat to official email/LOI-style discussion without claiming a done deal.",
+            "Objection handling for Nitron buying time because Iraq supply or route optionality may look cheaper or safer.",
+        ]
     if "sulfur" in lower_text or "sulphur" in lower_text:
         return physical_offer
     if is_relative_value_spread_query(lower_text):
@@ -2335,14 +2440,25 @@ def trader_search_queries(lower_text: str) -> list[str]:
             '"Bayesian game" "signaling game" "human-AI"',
             '"trader" "latent intent" "executable specification"',
         ]
+    if is_predeal_negotiation_query(lower_text):
+        return predeal_negotiation_search_queries(lower_text)
     if "sulfur" in lower_text or "sulphur" in lower_text:
+        if any(term in lower_text for term in ("iraq", "umm qasr")):
+            return [
+                '"sulfur" "Umm Qasr" FOB price',
+                '"Iraq" sulfur export "Umm Qasr"',
+                '"sulfur" market price Middle East FOB',
+                '"Umm Qasr" port sulfur cargo loading inspection',
+                '"Iraq" "Umm Qasr" sanctions shipping payment sulfur',
+                '"sulfur" 50000 tonnes FOB offer counterparty risk',
+            ]
         return [
-            '"sulfur" "Umm Qasr" FOB price',
-            '"Iraq" sulfur export "Umm Qasr"',
-            '"sulfur" market price Middle East FOB',
-            '"Umm Qasr" port sulfur cargo loading inspection',
-            '"Iraq" "Umm Qasr" sanctions shipping payment sulfur',
-            '"sulfur" 50000 tonnes FOB offer counterparty risk',
+            '"sulfur" "Kazakhstan" price benchmark',
+            '"Kazakhstan" sulfur export logistics',
+            '"Pavlodar" sulfur specification producer',
+            '"sulfur" market price Central Asia FOB',
+            '"sulfur" fertilizer buyer demand 20000 MT',
+            '"sulfur" counterparty negotiation specification document',
         ]
     if is_relative_value_spread_query(lower_text):
         return [
@@ -2382,6 +2498,13 @@ def extract_trader_search_terms(lower_text: str) -> list[str]:
         "mutual specification",
         "specification game",
         "latent intent",
+        "kazakhstan",
+        "kazakh",
+        "pavlodar",
+        "nitron",
+        "hormuz",
+        "loi",
+        "negotiation",
     )
     return [term for term in candidates if term in lower_text]
 
@@ -2407,6 +2530,52 @@ def is_physical_offer_query(lower_text: str) -> bool:
             "umm qasr",
         )
     )
+
+
+def is_predeal_negotiation_query(lower_text: str) -> bool:
+    text = lower_text.lower()
+    predeal_markers = (
+        "pre-deal",
+        "pre deal",
+        "predeal",
+        "planning stage",
+        "no loi",
+        "without loi",
+        "official negotiations",
+        "start official negotiations",
+        "open negotiations",
+        "convince",
+        "buyer discussion",
+        "whatsapp",
+        "linkedin",
+    )
+    counterparty_markers = (
+        "nitron",
+        "buyer",
+        "seller",
+        "factory",
+        "pavlodar",
+        "kazakh",
+        "kazakhstan",
+    )
+    return any(marker in text for marker in predeal_markers) and any(
+        marker in text for marker in counterparty_markers
+    )
+
+
+def predeal_negotiation_search_queries(lower_text: str) -> list[str]:
+    commodity = "sulfur sulphur" if ("sulfur" in lower_text or "sulphur" in lower_text) else "commodity"
+    origin = "Kazakhstan Pavlodar" if any(term in lower_text for term in ("kazakh", "kazakhstan", "pavlodar")) else "origin"
+    buyer = "Nitron" if "nitron" in lower_text else "buyer"
+    timing = "Hormuz Iran Israel shipping risk" if "hormuz" in lower_text else "shipping route timing risk"
+    return [
+        f'"{buyer}" {commodity} procurement trading',
+        f'"{origin}" {commodity} origin specification',
+        f'"{origin}" {commodity} export logistics',
+        f'{commodity} price benchmark Central Asia Middle East',
+        f'{timing} sulfur fertilizer shipping',
+        f'{buyer} Iraq sulfur inventory supply exposure',
+    ]
 
 
 def has_user_supplied_market_marks(lower_text: str) -> bool:
