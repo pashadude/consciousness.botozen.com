@@ -76,6 +76,11 @@ SPEECH_TEXT_FORM = Form("")
 FILES_FORM = File(None)
 JSON_BODY = Body(...)
 OPERATOR_REVIEW_TOKEN_HEADER = Header(default=None)
+REVIEW_EVIDENCE_ACTIONS = {
+    "run_evidence_search",
+    "retrieve_evidence",
+    "search_evidence",
+}
 
 
 @dataclass(frozen=True)
@@ -181,23 +186,7 @@ async def create_spec_json(
             ),
             "formal_proofs": result.ledger.formal_proofs.model_dump(mode="json"),
             "frontier": [candidate.key for candidate in result.candidates if candidate.key in result.frontier_keys],
-            "source_layer": {
-                "provider": result.rag_result.provider,
-                "status": result.rag_result.status,
-                "queries": result.rag_result.queries,
-                "required_evidence": result.rag_result.required_evidence,
-                "warnings": result.rag_result.warnings,
-                "evidence": [
-                    {
-                        "title": item.title,
-                        "url": item.url,
-                        "summary": item.summary,
-                        "query": item.query,
-                        "source": item.source,
-                    }
-                    for item in result.rag_result.evidence
-                ],
-            },
+            "source_layer": source_layer_payload(result.rag_result),
         }
     )
 
@@ -220,8 +209,21 @@ async def human_review_json(
     note = str(payload.get("note") or "").strip()
     operator = str(payload.get("operator") or "console_operator").strip() or "console_operator"
     ledger = SpecLedger.model_validate(ledger_payload)
-    message = apply_operator_review(ledger, action=action, note=note, operator=operator)
-    update_mutual_spec_game_state(ledger)
+    rag_result: TraderRagResult | None = None
+    if action in REVIEW_EVIDENCE_ACTIONS:
+        message, rag_result = run_operator_evidence_search(
+            ledger,
+            note=note,
+            operator=operator,
+        )
+    else:
+        message = apply_operator_review(
+            ledger,
+            action=action,
+            note=note,
+            operator=operator,
+        )
+        update_mutual_spec_game_state(ledger)
     append_human_review_log(ledger, action=action, note=note, operator=operator, message=message)
     background_tasks.add_task(
         persist_human_review_talk,
@@ -241,6 +243,10 @@ async def human_review_json(
             "decision_gate_label": readable_state(ledger.decision_gate),
             "spec_convergence": ledger.spec_convergence.model_dump(mode="json"),
             "operator_message": message,
+            "source_layer": source_layer_payload(rag_result) if rag_result else None,
+            "proof_obligations": [
+                item.model_dump(mode="json") for item in ledger.proof_obligations
+            ],
         }
     )
 
@@ -482,6 +488,37 @@ def console_sync_rag_env(env: Mapping[str, str]) -> dict[str, str]:
             "semantic",
         )
     return sync_env
+
+
+def console_review_rag_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Use a slower, operator-triggered source route for review evidence."""
+
+    review_env = dict(env)
+    provider = (
+        env.get("CONSOLE_REVIEW_RAG_PROVIDER")
+        or env.get("TRADER_RAG_PROVIDER")
+        or "disabled"
+    ).strip()
+    if provider:
+        review_env["TRADER_RAG_PROVIDER"] = provider
+    review_env["TRADER_RAG_MAX_QUERIES"] = env.get(
+        "CONSOLE_REVIEW_RAG_MAX_QUERIES",
+        env.get("TRADER_RAG_MAX_QUERIES", "6"),
+    )
+    review_env["TRADER_RAG_MAX_RESULTS"] = env.get(
+        "CONSOLE_REVIEW_RAG_MAX_RESULTS",
+        env.get("TRADER_RAG_MAX_RESULTS", "8"),
+    )
+    review_env["TRADER_RAG_TIMEOUT_SECONDS"] = env.get(
+        "CONSOLE_REVIEW_RAG_TIMEOUT_SECONDS",
+        env.get("TRADER_RAG_TIMEOUT_SECONDS", "10"),
+    )
+    if "spanner_rag" in configured_provider_names(review_env):
+        review_env["SPANNER_RAG_SEARCH_MODE"] = env.get(
+            "CONSOLE_REVIEW_SPANNER_RAG_SEARCH_MODE",
+            env.get("SPANNER_RAG_SEARCH_MODE", "hybrid"),
+        )
+    return review_env
 
 
 def configured_provider_names(env: Mapping[str, str]) -> set[str]:
@@ -761,8 +798,8 @@ def current_turn_state(result: ConsoleResult) -> TurnState:
             owner_label="Operator",
             title="Human review packet is open",
             detail=(
-                "The operator can start review, request changes, reject, or approve only "
-                "after hard evidence and proof obligations are cleared."
+                "The operator can start review, run evidence search, request changes, "
+                "reject, or approve only after hard evidence and proof obligations are cleared."
             ),
             next_action=review.required_actions[0]
             if review.required_actions
@@ -1127,9 +1164,7 @@ def apply_operator_review(
         message = "Operator rejected the current decision frame."
     else:
         message = "Operator started human review."
-    signal = f"{operator}: {action}"
-    if note:
-        signal = f"{signal} - {note}"
+    signal = operator_review_signal(operator, action, note)
     ledger.human_review = ledger.human_review.model_copy(
         update={
             "status": status,
@@ -1138,6 +1173,88 @@ def apply_operator_review(
         }
     )
     return message
+
+
+def run_operator_evidence_search(
+    ledger: SpecLedger,
+    *,
+    note: str,
+    operator: str,
+) -> tuple[str, TraderRagResult]:
+    query = ledger.expressed_query or ledger.user_request
+    if not query.strip():
+        raise HTTPException(status_code=400, detail="query is required before evidence search")
+
+    signal = operator_review_signal(operator, "run_evidence_search", note)
+    review_update = {
+        "last_reviewer_signal": signal,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    if ledger.human_review.required:
+        review_update["status"] = "in_review"
+    ledger.human_review = ledger.human_review.model_copy(update=review_update)
+
+    record_stage(ledger, "retrieve_evidence")
+    add_route(ledger, route_for_stage("retrieve_evidence", ledger))
+    rag_result = run_trader_rag(
+        query,
+        env=console_review_rag_env(os.environ),
+        search_plan=ledger.search_plan,
+    )
+    apply_rag_to_ledger(ledger, rag_result)
+    formalize_ledger(ledger)
+    draft = build_draft_from_ledger(ledger)
+    verification = verify_draft(ledger, draft)
+    ledger.verification_findings = verification.findings
+    update_mutual_spec_game_state(ledger)
+
+    if rag_result.status == "retrieved":
+        return (
+            f"Evidence search attached {len(rag_result.evidence)} cited item(s). "
+            "Operator approval is still blocked until remaining proof obligations are clear.",
+            rag_result,
+        )
+    if rag_result.status in {"planned", "configured", "deferred"}:
+        return (
+            "Evidence route is configured or planned, but no cited item was attached in this console response.",
+            rag_result,
+        )
+    if rag_result.status == "empty":
+        return (
+            "Evidence search ran, but no relevant cited item passed the relevance filter.",
+            rag_result,
+        )
+    return (
+        f"Evidence search did not attach usable evidence; source status is {readable_state(rag_result.status)}.",
+        rag_result,
+    )
+
+
+def operator_review_signal(operator: str, action: str, note: str) -> str:
+    signal = f"{operator}: {action}"
+    if note:
+        signal = f"{signal} - {note}"
+    return signal
+
+
+def source_layer_payload(rag_result: TraderRagResult) -> dict[str, object]:
+    return {
+        "provider": rag_result.provider,
+        "status": rag_result.status,
+        "queries": rag_result.queries,
+        "required_evidence": rag_result.required_evidence,
+        "warnings": rag_result.warnings,
+        "evidence": [
+            {
+                "title": item.title,
+                "url": item.url,
+                "summary": item.summary,
+                "query": item.query,
+                "source": item.source,
+            }
+            for item in rag_result.evidence
+        ],
+    }
 
 
 def alignment_message(action: str, ledger: SpecLedger) -> str:
@@ -1235,10 +1352,10 @@ def render_human_review_notice(review: HumanReviewState) -> str:
     action = review.required_actions[0] if review.required_actions else "Resolve the open evidence and verification packet."
     return f"""
   <div class="review-notice {review_status_class(review.status)}">
-    <strong>Why human review is {escape(readable_state(review.status))}:</strong>
-    <p>{escape(reason)}</p>
-    <p><span class="label-inline">Next</span> {escape(action)}</p>
-    <p><span class="label-inline">Meaning</span> The agent may provide a provisional decision frame, but it must not present this as execution-ready or take/broker action.</p>
+    <strong>Review status: {escape(readable_state(review.status))}</strong>
+    <p><span class="label-inline">Why required</span> {escape(reason)}</p>
+    <p><span class="label-inline">Operator next</span> {escape(action)}</p>
+    <p><span class="label-inline">Rule</span> Prompt text cannot approve this gate. Use the operator buttons below; approval is refused while evidence, artifact, verifier, or formal obligations remain open.</p>
   </div>
 """
 
@@ -1699,6 +1816,75 @@ def render_artifacts_panel(result: ConsoleResult) -> str:
 """
 
 
+def render_review_workflow(result: ConsoleResult) -> str:
+    review = result.ledger.human_review
+    evidence_open = any(
+        item.required and item.status != "satisfied"
+        for item in result.ledger.search_plan
+    )
+    hard_open = has_open_hard_obligations(result.ledger)
+    steps = [
+        (
+            "1",
+            "Start",
+            "current" if review.status == "queued" else "complete",
+            "Claim operator ownership of the review packet.",
+        ),
+        (
+            "2",
+            "Search",
+            "current" if evidence_open else "complete",
+            "Run source agents for price, logistics, compliance, documents, and resale evidence.",
+        ),
+        (
+            "3",
+            "Resolve",
+            "blocked" if hard_open else "complete",
+            "Support, waive with rationale, or remove blocking claims and obligations.",
+        ),
+        (
+            "4",
+            "Gate",
+            "complete" if review.status == "approved" else "current",
+            "Approve only a reviewed frame; otherwise request changes or reject.",
+        ),
+    ]
+    rows = "\n".join(
+        f"""
+<li class="{escape(state)}">
+  <span>{escape(index)}</span>
+  <strong>{escape(title)}</strong>
+  <p>{escape(detail)}</p>
+</li>
+"""
+        for index, title, state, detail in steps
+    )
+    return f"""
+  <ol class="review-workflow">{rows}</ol>
+  <div class="review-docs">
+    <strong>How to operate this gate</strong>
+    <p>Do not type "agree" or "approve" into the user prompt. The trader prompt is part of q; operator review is a separate gate action.</p>
+    <p>Use <b>Run Evidence Search</b> to ask configured source agents for evidence. Then use <b>Approve Gate</b>, <b>Request Changes</b>, or <b>Reject Frame</b>.</p>
+  </div>
+"""
+
+
+def render_review_evidence_tasks(result: ConsoleResult) -> str:
+    if not result.ledger.search_plan:
+        return '<ul class="source-list"><li><span>No evidence tasks generated for this query.</span></li></ul>'
+    rows = "\n".join(
+        f"""
+<li class="{escape(item.status)}">
+  <strong>{escape(item.purpose)}</strong>
+  <span>{escape(item.status)} | {escape(', '.join(item.preferred_sources) or 'source layer')}</span>
+  <p>{escape(item.query)}</p>
+</li>
+"""
+        for item in result.ledger.search_plan[:10]
+    )
+    return f'<ul class="source-list">{rows}</ul>'
+
+
 def render_human_review_panel(result: ConsoleResult) -> str:
     review = result.ledger.human_review
     notice = render_human_review_notice(review)
@@ -1711,17 +1897,19 @@ def render_human_review_panel(result: ConsoleResult) -> str:
 <section class="panel review-panel">
   <div class="panel-title">
     <div>
-      <h2>Human Review Gate</h2>
-      <p class="subtle">Operator review is a gate decision. It does not override missing evidence or verifier obligations.</p>
+      <h2>Operator Review Workflow</h2>
+      <p class="subtle">Use buttons here. User prompt text does not approve the gate.</p>
     </div>
     <span id="humanReviewStatusPill" class="pill {review_status_class(review.status)}">{escape(readable_state(review.status))}</span>
   </div>
   {notice}
+  {render_review_workflow(result)}
   <div class="review-actions">
     <label for="humanReviewNote">Operator note</label>
-    <textarea id="humanReviewNote" rows="3" placeholder="Evidence checked, concern, or reason for approval/rejection"></textarea>
+    <textarea id="humanReviewNote" rows="3" placeholder="Evidence checked, concern, waiver rationale, or reason for approval/rejection"></textarea>
     <div class="button-row">
       <button type="button" data-review-action="start_review">Start Review</button>
+      <button type="button" data-review-action="run_evidence_search">Run Evidence Search</button>
       <button type="button" data-review-action="approve">Approve Gate</button>
       <button type="button" data-review-action="request_changes">Request Changes</button>
       <button type="button" data-review-action="reject">Reject Frame</button>
@@ -1737,6 +1925,10 @@ def render_human_review_panel(result: ConsoleResult) -> str:
   <details>
     <summary>Reasons</summary>
     {reason_rows}
+  </details>
+  <details open>
+    <summary>Evidence Tasks</summary>
+    {render_review_evidence_tasks(result)}
   </details>
   <details open>
     <summary>Required Actions</summary>
@@ -2553,6 +2745,57 @@ form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; 
   border-radius: 8px;
   background: #fbfcfb;
 }
+.review-workflow {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+.review-workflow li {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px;
+  background: #fbfcfb;
+}
+.review-workflow li.current { border-color: #9acbc6; background: #eefaf8; }
+.review-workflow li.complete { border-color: #9ccdad; background: #eefaf3; }
+.review-workflow li.blocked { border-color: #e3cc95; background: #fff8e7; }
+.review-workflow li > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.review-workflow strong { font-size: 13px; line-height: 1.2; }
+.review-workflow p {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.review-docs {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #f9faf8;
+}
+.review-docs strong { font-size: 13px; }
+.review-docs p { color: var(--muted); font-size: 13px; line-height: 1.4; }
 .alignment-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2597,6 +2840,8 @@ summary { cursor: pointer; margin-bottom: 8px; }
 .source-list li { border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: #fbfcfb; }
 .source-list li.satisfied { border-color: #b9d8c5; background: #f0fbf6; }
 .source-list li.failed { border-color: #e3a29b; background: #fff6f5; }
+.source-list li.planned, .source-list li.open { border-color: #e3cc95; background: #fff8e7; }
+.source-list li.searched { border-color: #b8cbe2; background: #eff6ff; }
 .source-list strong { display: block; font-size: 13px; }
 .source-list span { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .source-list p { font-size: 13px; margin-top: 5px; overflow-wrap: anywhere; }
@@ -2634,7 +2879,7 @@ tr.dominated td { color: var(--muted); }
 }
 @media (max-width: 760px) {
   .shell { width: min(100vw - 20px, 720px); padding-top: 12px; }
-  .topbar, .workspace, .right-rail, .spec-grid, .detail-grid, .alignment-grid, .chain-steps { display: flex; flex-direction: column; }
+  .topbar, .workspace, .right-rail, .spec-grid, .detail-grid, .alignment-grid, .chain-steps, .review-workflow { display: flex; flex-direction: column; }
   .chain-steps li + li::before { display: none; }
   h1 { font-size: 21px; }
 }
@@ -2795,8 +3040,13 @@ copyAnswerButton?.addEventListener("click", async () => {
 document.querySelectorAll("[data-review-action]").forEach(button => {
   button.addEventListener("click", async () => {
     const action = button.dataset.reviewAction;
+    const isEvidenceSearch = action === "run_evidence_search";
     button.disabled = true;
-    if (humanReviewResult) humanReviewResult.textContent = "submitting operator review...";
+    if (humanReviewResult) {
+      humanReviewResult.textContent = isEvidenceSearch
+        ? "running evidence search with configured source agents..."
+        : "submitting operator review...";
+    }
     try {
       const response = await fetch("/api/human-review", {
         method: "POST",
@@ -2836,7 +3086,11 @@ document.querySelectorAll("[data-review-action]").forEach(button => {
         setTurnState("blocked", "User/Agent", `Review is ${readableStatus(payload.human_review.status)}`, "The shared spec needs correction, more evidence, or a revised frame.", payload.operator_message || "Resolve the operator review note.");
       }
       if (humanReviewResult) {
-        humanReviewResult.textContent = `${payload.operator_message} Gate: ${payload.decision_gate_label}.`;
+        const source = payload.source_layer;
+        const sourceSuffix = source
+          ? ` Sources: ${source.status} / ${(source.evidence || []).length}.`
+          : "";
+        humanReviewResult.textContent = `${payload.operator_message}${sourceSuffix} Gate: ${payload.decision_gate_label}.`;
       }
     } catch (error) {
       if (humanReviewResult) humanReviewResult.textContent = error.message || "review failed";

@@ -82,7 +82,9 @@ The remaining theory machinery should be implemented in this order:
 | 5 | Lean/Coq bridge | Reserve for narrow, formalizable claims; most market and logistics claims remain empirical rather than theorem-proving problems. |
 
 Priority 1 is implemented in the MVP as `SpecLedger.human_review` plus the
-console's Human Review Queue panel. Priority 2 is implemented as
+console's Operator Review Workflow panel. The review workflow is documented in
+[`operator_human_review_workflow.md`](operator_human_review_workflow.md).
+Priority 2 is implemented as
 `SpecLedger.skill_compatibility` plus the console's Skill Compatibility panel.
 Priority 3 is implemented as `SpecLedger.proof_obligations` plus the console's
 Proof Obligations panel. Priority 4 is implemented as

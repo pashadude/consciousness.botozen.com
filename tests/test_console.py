@@ -270,13 +270,16 @@ def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) ->
     assert "Ball: Operator" in response.text
     assert "Chain + Loop State" in response.text
     assert "Trader Source Layer" in response.text
-    assert "Human Review Gate" in response.text
-    assert "Operator review is a gate decision" in response.text
-    assert "Why human review is queued for human review" in response.text
+    assert "Operator Review Workflow" in response.text
+    assert "Use buttons here. User prompt text does not approve the gate." in response.text
+    assert "Review status: queued for human review" in response.text
+    assert "Prompt text cannot approve this gate" in response.text
     assert "Start Review" in response.text
+    assert "Run Evidence Search" in response.text
     assert "Approve Gate" in response.text
     assert "Request Changes" in response.text
     assert "Reject Frame" in response.text
+    assert "Evidence Tasks" in response.text
     assert "Skill Compatibility" in response.text
     assert "Proof Obligations" in response.text
     assert "Equilibrium Diagnostics" in response.text
@@ -365,4 +368,58 @@ def test_console_operator_can_submit_human_review(tmp_path, monkeypatch) -> None
     assert payload["human_review"]["status"] == "changes_requested"
     assert payload["decision_gate"] == "needs_more_info"
     assert "requested changes" in payload["operator_message"]
+    assert (tmp_path / "reviews.jsonl").exists()
+
+
+def test_console_operator_can_run_review_evidence_search(tmp_path, monkeypatch) -> None:
+    fixture = tmp_path / "search.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "title": "Sulfur FOB benchmark",
+                        "url": "https://example.test/sulfur-fob",
+                        "snippet": "A source-backed benchmark needed before accepting the offer.",
+                    }
+                ]
+            }
+        )
+    )
+    monkeypatch.setenv("CONSOLE_UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setenv("HUMAN_REVIEW_LOG_PATH", str(tmp_path / "reviews.jsonl"))
+    monkeypatch.setenv("TRADER_RAG_PROVIDER", "fixture")
+    monkeypatch.setenv("TRADER_RAG_FIXTURE_PATH", str(fixture))
+    client = TestClient(app)
+
+    spec_response = client.post(
+        "/api/spec",
+        data={
+            "query": (
+                "Look i have an offer of 50000 tonns of sulfur in Iraq, "
+                "Umm Qasr, fob 550, should i go for it?"
+            )
+        },
+    )
+    ledger = spec_response.json()["ledger"]
+
+    review_response = client.post(
+        "/api/human-review",
+        json={
+            "ledger": ledger,
+            "action": "run_evidence_search",
+            "note": "Operator wants cited price evidence before gate decision.",
+            "operator": "test_operator",
+        },
+    )
+    payload = review_response.json()
+
+    assert review_response.status_code == 200
+    assert payload["human_review"]["status"] == "in_review"
+    assert payload["source_layer"]["status"] == "retrieved"
+    assert payload["source_layer"]["evidence"][0]["title"] == "Sulfur FOB benchmark"
+    assert "Evidence search attached" in payload["operator_message"]
+    assert payload["ledger"]["human_review"]["last_reviewer_signal"].startswith(
+        "test_operator: run_evidence_search"
+    )
     assert (tmp_path / "reviews.jsonl").exists()

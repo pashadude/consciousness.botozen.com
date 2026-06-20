@@ -191,6 +191,13 @@ speech artifact, and supported browsers can also place speech text into the
 query field. Uploaded binaries are stored outside session state; the ledger only
 keeps metadata artifact references.
 
+Human review is operated with the console buttons, not by typing approval into
+the prompt. For high-stakes trader packets, use `Start Review`, `Run Evidence
+Search`, then `Approve Gate`, `Request Changes`, or `Reject Frame`. Approval is
+refused while evidence, artifact, verifier, or formalization obligations remain
+open. See
+[docs/design/operator_human_review_workflow.md](docs/design/operator_human_review_workflow.md).
+
 For deterministic plain output without ANSI color:
 
 ```bash
