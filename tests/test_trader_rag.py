@@ -4,6 +4,7 @@ import json
 from app.spec_state import SpecLedger, update_ledger_from_user_text
 from app.trader_rag import (
     SearchEvidence,
+    TraderRagResult,
     TraderSourceConfig,
     apply_rag_to_ledger,
     dedupe_evidence,
@@ -18,6 +19,7 @@ from app.trader_rag import (
     mcp_stdio_env,
     records_from_mcp_payload,
     run_async_mcp,
+    run_multi_provider,
     run_trader_rag,
     spanner_row_is_self_memory,
     spanner_rows_to_evidence,
@@ -707,6 +709,49 @@ def test_joined_spanner_and_mcp_provider_merges_evidence(monkeypatch) -> None:
     assert result.provider == "spanner_rag+opoint_mcp"
     assert result.status == "retrieved"
     assert {item.source for item in result.evidence} == {"spanner_rag", "opoint_mcp"}
+
+
+def test_joined_provider_reports_empty_when_one_source_errors_and_one_returns_no_evidence(
+    monkeypatch,
+) -> None:
+    def fake_run_single_provider(provider, queries, required_evidence, *, config):
+        if provider == "spanner_rag":
+            return TraderRagResult(
+                provider="spanner_rag",
+                status="provider_error",
+                queries=queries,
+                required_evidence=required_evidence,
+                warnings=["spanner failed"],
+            )
+        return TraderRagResult(
+            provider="opoint_mcp",
+            status="empty",
+            queries=queries,
+            required_evidence=required_evidence,
+            warnings=["mcp returned no relevant article evidence"],
+        )
+
+    monkeypatch.setattr("app.trader_rag.run_single_provider", fake_run_single_provider)
+    config = TraderSourceConfig(
+        provider="spanner_rag,mcp",
+        google_agent_search_enabled=False,
+        max_queries=3,
+        max_results=5,
+        timeout_seconds=6,
+    )
+
+    result = run_multi_provider(
+        ["spanner_rag", "mcp"],
+        ['"sulfur" "Umm Qasr" FOB price'],
+        ["Price benchmark and market context near the offer date."],
+        config=config,
+    )
+
+    assert result.provider == "spanner_rag+opoint_mcp"
+    assert result.status == "empty"
+    assert result.evidence == []
+    assert "spanner_rag: spanner failed" in result.warnings
+    assert "opoint_mcp: mcp returned no relevant article evidence" in result.warnings
 
 
 def test_yaml_source_layer_defaults_can_enable_google_agent_search(tmp_path) -> None:

@@ -1211,21 +1211,25 @@ def run_operator_evidence_search(
     if rag_result.status == "retrieved":
         return (
             f"Evidence search attached {len(rag_result.evidence)} cited item(s). "
-            "Operator approval is still blocked until remaining proof obligations are clear.",
+            "Operator approval is still blocked until remaining proof obligations are clear."
+            + source_warning_summary(rag_result),
             rag_result,
         )
     if rag_result.status in {"planned", "configured", "deferred"}:
         return (
-            "Evidence route is configured or planned, but no cited item was attached in this console response.",
+            "Evidence route is configured or planned, but no cited item was attached in this console response."
+            + source_warning_summary(rag_result),
             rag_result,
         )
     if rag_result.status == "empty":
         return (
-            "Evidence search ran, but no relevant cited item passed the relevance filter.",
+            "Evidence search ran, but no relevant cited item passed the relevance filter."
+            + source_warning_summary(rag_result),
             rag_result,
         )
     return (
-        f"Evidence search did not attach usable evidence; source status is {readable_state(rag_result.status)}.",
+        f"Evidence search did not attach usable evidence; source status is {readable_state(rag_result.status)}."
+        + source_warning_summary(rag_result),
         rag_result,
     )
 
@@ -1255,6 +1259,14 @@ def source_layer_payload(rag_result: TraderRagResult) -> dict[str, object]:
             for item in rag_result.evidence
         ],
     }
+
+
+def source_warning_summary(rag_result: TraderRagResult) -> str:
+    warnings = [item.strip() for item in rag_result.warnings if item.strip()]
+    if not warnings:
+        return ""
+    clipped = [item[:240] for item in warnings[:3]]
+    return " Source warnings: " + " | ".join(clipped) + "."
 
 
 def alignment_message(action: str, ledger: SpecLedger) -> str:
@@ -3090,7 +3102,10 @@ document.querySelectorAll("[data-review-action]").forEach(button => {
         const sourceSuffix = source
           ? ` Sources: ${source.status} / ${(source.evidence || []).length}.`
           : "";
-        humanReviewResult.textContent = `${payload.operator_message}${sourceSuffix} Gate: ${payload.decision_gate_label}.`;
+        const warningSuffix = source?.warnings?.length
+          ? ` Warnings: ${source.warnings.slice(0, 2).join(" | ")}`
+          : "";
+        humanReviewResult.textContent = `${payload.operator_message}${sourceSuffix}${warningSuffix} Gate: ${payload.decision_gate_label}.`;
       }
     } catch (error) {
       if (humanReviewResult) humanReviewResult.textContent = error.message || "review failed";

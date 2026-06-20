@@ -482,18 +482,7 @@ def run_multi_provider(
         for result in results
         for warning in result.warnings
     ]
-    if evidence:
-        status = "retrieved"
-    elif all(result.status == "missing_config" for result in results):
-        status = "missing_config"
-    elif any(result.status == "provider_error" for result in results):
-        status = "provider_error"
-    elif any(result.status == "configured" for result in results):
-        status = "configured"
-    elif any(result.status == "planned" for result in results):
-        status = "planned"
-    else:
-        status = results[0].status if results else "empty"
+    status = joined_provider_status(results, evidence)
     return TraderRagResult(
         provider="+".join(result.provider for result in results),
         status=status,
@@ -502,6 +491,30 @@ def run_multi_provider(
         evidence=evidence,
         warnings=warnings,
     )
+
+
+def joined_provider_status(
+    results: list[TraderRagResult],
+    evidence: list[SearchEvidence],
+) -> str:
+    if evidence:
+        return "retrieved"
+    statuses = [result.status for result in results]
+    if not statuses:
+        return "empty"
+    if all(status == "missing_config" for status in statuses):
+        return "missing_config"
+    if all(status in {"missing_config", "provider_error"} for status in statuses):
+        return "provider_error"
+    if any(status == "empty" for status in statuses):
+        return "empty"
+    if any(status == "configured" for status in statuses):
+        return "configured"
+    if any(status == "planned" for status in statuses):
+        return "planned"
+    if any(status == "provider_error" for status in statuses):
+        return "provider_error"
+    return statuses[0]
 
 
 def run_single_provider(
