@@ -20,9 +20,14 @@ def test_console_home_renders_multimodal_operator_surface(monkeypatch) -> None:
     assert "Mutual Spec Console" in response.text
     assert 'accept="image/*,audio/*,application/pdf,text/*"' in response.text
     assert "Record Speech" in response.text
+    assert "Current Handoff" in response.text
+    assert "Ball: User" in response.text
+    assert "Verifier: waiting" in response.text
+    assert "Chain + Loop State" in response.text
     assert "Route Before Decision" in response.text
     assert "Alignment Loop" in response.text
     assert "Model Handoff Plan" in response.text
+    assert "Advanced ledgers and diagnostics" in response.text
     assert "Model-Region Frontier" in response.text
 
 
@@ -262,6 +267,8 @@ def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) ->
 
     assert response.status_code == 200
     assert "Mutual Specification Game" in response.text
+    assert "Ball: Operator" in response.text
+    assert "Chain + Loop State" in response.text
     assert "Trader Source Layer" in response.text
     assert "Human Review Gate" in response.text
     assert "Operator review is a gate decision" in response.text

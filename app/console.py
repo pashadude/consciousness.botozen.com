@@ -91,6 +91,16 @@ class ConsoleResult:
     market_math: MarketMathFrame | None = None
 
 
+@dataclass(frozen=True)
+class TurnState:
+    owner: str
+    owner_label: str
+    title: str
+    detail: str
+    next_action: str
+    css_class: str
+
+
 app = FastAPI(title="Mutual Spec Console")
 
 
@@ -373,6 +383,7 @@ def build_initial_console_result() -> ConsoleResult:
         telemetry_enabled=flag_enabled("RESOURCE_REGION_DOMINATION_ENABLED"),
         artifact_count=0,
     )
+    ledger.decision_gate = "needs_more_info"
     candidates = sample_route_candidates(os.environ)
     return ConsoleResult(
         ledger=ledger,
@@ -618,7 +629,9 @@ def render_ledger_payload(result: ConsoleResult) -> str:
 
 def render_header(result: ConsoleResult) -> str:
     gate_class = gate_status_class(result.ledger.decision_gate)
-    verify_class = "verified" if result.verification_passed else "blocked"
+    has_query = bool(result.ledger.expressed_query or result.ledger.user_request)
+    verify_class = "verified" if result.verification_passed else "neutral" if not has_query else "blocked"
+    verify_label = "passed" if result.verification_passed else "waiting" if not has_query else "blocked"
     route_mode = str(getattr(result.route_decision, "mode", "sync"))
     return f"""
 <header class="topbar">
@@ -628,7 +641,7 @@ def render_header(result: ConsoleResult) -> str:
   </div>
   <div class="status-strip">
     <span id="specStatusPill" class="pill {status_class(result.ledger.status)}">Spec: {escape(readable_state(result.ledger.status))}</span>
-    <span id="verifierStatusPill" class="pill {verify_class}">Verifier: {'passed' if result.verification_passed else 'blocked'}</span>
+    <span id="verifierStatusPill" class="pill {verify_class}">Verifier: {escape(verify_label)}</span>
     <span id="gateStatusPill" class="pill {gate_class}">Gate: {escape(readable_state(result.ledger.decision_gate))}</span>
     <span id="routeStatusPill" class="pill {route_status_class(route_mode)}">Route: {escape(readable_state(route_mode))}</span>
   </div>
@@ -646,26 +659,34 @@ def render_workspace(
 <section class="workspace">
   <section class="left-rail">
     {render_input_form(text)}
-    {render_status_panel(env)}
+    {render_turn_panel(result)}
   </section>
   <section class="center-rail">
     {render_operator_route_panel(result)}
     {render_decision_summary_panel(result)}
     {render_alignment_panel(result)}
-    {render_game_panel(result)}
-    {render_source_layer_panel(result)}
-    {render_proof_obligations_panel(result)}
-    {render_equilibrium_panel(result)}
-    {render_formal_proof_panel(result)}
-    {render_spec_panel(result)}
-    {render_frontier_panel(result)}
   </section>
   <section class="right-rail">
-    {render_artifacts_panel(result)}
     {render_human_review_panel(result)}
-    {render_skill_compatibility_panel(result)}
+    {render_source_layer_panel(result)}
+    {render_artifacts_panel(result)}
     {render_route_panel(result)}
+    {render_skill_compatibility_panel(result)}
     {render_spend_panel(spend)}
+    {render_status_panel(env)}
+  </section>
+  <section class="advanced-rail">
+    <details class="advanced-drawer">
+      <summary>Advanced ledgers and diagnostics</summary>
+      <div class="advanced-grid">
+        {render_game_panel(result)}
+        {render_proof_obligations_panel(result)}
+        {render_equilibrium_panel(result)}
+        {render_formal_proof_panel(result)}
+        {render_spec_panel(result)}
+        {render_frontier_panel(result)}
+      </div>
+    </details>
   </section>
 </section>
 """
@@ -693,6 +714,127 @@ def render_input_form(text: str) -> str:
 """
 
 
+def render_turn_panel(result: ConsoleResult) -> str:
+    turn = current_turn_state(result)
+    return f"""
+<section class="panel turn-panel {escape(turn.css_class)}">
+  <div class="turn-heading">
+    <span class="turn-ball">{escape(turn.owner_label[:1])}</span>
+    <div>
+      <h2>Current Handoff</h2>
+      <p id="turnTitle" class="subtle">{escape(turn.title)}</p>
+    </div>
+  </div>
+  <div class="turn-owner-row">
+    <span id="turnOwnerPill" class="pill {escape(turn.css_class)}">Ball: {escape(turn.owner_label)}</span>
+    <span class="pill neutral">Gate: {escape(readable_state(result.ledger.decision_gate))}</span>
+  </div>
+  <p id="turnDetail" class="turn-detail">{escape(turn.detail)}</p>
+  <div class="next-move">
+    <span class="label-inline">Next move</span>
+    <p id="turnNext">{escape(turn.next_action)}</p>
+  </div>
+</section>
+"""
+
+
+def current_turn_state(result: ConsoleResult) -> TurnState:
+    ledger = result.ledger
+    review = ledger.human_review
+    formal_missing = latest_missing_formal_obligations(ledger)
+    open_evidence = [
+        item for item in ledger.search_plan if item.required and item.status != "satisfied"
+    ]
+
+    if not ledger.expressed_query:
+        return TurnState(
+            owner="user",
+            owner_label="User",
+            title="Waiting for task signal",
+            detail="No query has entered the specification game yet.",
+            next_action="Enter a task, attach artifacts if needed, then run the spec.",
+            css_class="user",
+        )
+    if review.required and review.status in {"queued", "in_review"}:
+        return TurnState(
+            owner="operator",
+            owner_label="Operator",
+            title="Human review packet is open",
+            detail=(
+                "The operator can start review, request changes, reject, or approve only "
+                "after hard evidence and proof obligations are cleared."
+            ),
+            next_action=review.required_actions[0]
+            if review.required_actions
+            else "Review the decision packet and choose a gate action.",
+            css_class="operator",
+        )
+    if review.status in {"changes_requested", "rejected"}:
+        return TurnState(
+            owner="user_agent",
+            owner_label="User/Agent",
+            title=f"Review is {readable_state(review.status)}",
+            detail="The shared spec needs correction, more evidence, or a revised decision frame.",
+            next_action=review.last_reviewer_signal
+            or "Resolve the operator note, then rerun or resubmit the review packet.",
+            css_class="blocked",
+        )
+    if result.rag_result.status == "deferred" or ledger.status == "async_pending":
+        return TurnState(
+            owner="tools",
+            owner_label="Agent/Tools",
+            title="Deep evidence route is queued",
+            detail="The page returned a provisional frame while tool-heavy research is deferred.",
+            next_action="Use the source and proof obligations as the research queue before finalizing.",
+            css_class="tools",
+        )
+    if ledger.ambiguities or formal_missing:
+        missing = [item.field for item in ledger.ambiguities] + formal_missing
+        return TurnState(
+            owner="user",
+            owner_label="User",
+            title="Specification still needs a user move",
+            detail="The current spec has unresolved fields: " + ", ".join(missing[:6]) + ".",
+            next_action="Answer or correct the unresolved fields in the alignment loop.",
+            css_class="user",
+        )
+    if open_evidence:
+        return TurnState(
+            owner="tools",
+            owner_label="Agent/Tools",
+            title="Evidence obligations remain open",
+            detail=f"{len(open_evidence)} required evidence item(s) still need support or waiver.",
+            next_action=open_evidence[0].purpose,
+            css_class="tools",
+        )
+    if not result.verification_passed:
+        return TurnState(
+            owner="agent",
+            owner_label="Agent",
+            title="Verifier blocked the draft",
+            detail="The response must be repaired before it can move to a decision gate.",
+            next_action="Repair verifier findings and rerun verification.",
+            css_class="agent",
+        )
+    if ledger.decision_gate != "needs_more_info":
+        return TurnState(
+            owner="gate",
+            owner_label="Gate",
+            title="Decision frame is ready for the user",
+            detail="Hard gates are clear for the current scope.",
+            next_action="Use, copy, or correct the frame through the alignment loop.",
+            css_class="verified",
+        )
+    return TurnState(
+        owner="agent",
+        owner_label="Agent",
+        title="Provisional frame needs one more pass",
+        detail="The system has not identified a single owner-specific blocker.",
+        next_action="Inspect the chain step marked current or blocked.",
+        css_class="agent",
+    )
+
+
 def render_operator_route_panel(result: ConsoleResult) -> str:
     steps = build_operator_route_steps(result)
     rows = "\n".join(
@@ -708,17 +850,31 @@ def render_operator_route_panel(result: ConsoleResult) -> str:
 """
         for index, title, state_label, detail, css_class in steps
     )
+    chain_rows = "\n".join(
+        f"""
+<li class="{escape(node['state'])} {escape(node['owner'])}">
+  <span class="chain-owner">{escape(node['owner_label'])}</span>
+  <strong>{escape(node['title'])}</strong>
+  <p>{escape(node['detail'])}</p>
+</li>
+"""
+        for node in build_process_chain_nodes(result)
+    )
     return f"""
 <section class="panel route-progress-panel">
   <div class="panel-title">
     <div>
-      <h2>Route Before Decision</h2>
-      <p class="subtle">The decision frame below is provisional until each required route step clears.</p>
+      <h2>Chain + Loop State</h2>
+      <p class="subtle">q -> theta -> evidence -> review -> gate.</p>
     </div>
     <span id="routeGatePill" class="pill {gate_status_class(result.ledger.decision_gate)}">{escape(readable_state(result.ledger.decision_gate))}</span>
   </div>
-  <ol class="route-steps">{rows}</ol>
-  {render_model_handoff_plan(result)}
+  <ol class="chain-steps">{chain_rows}</ol>
+  <details>
+    <summary>Route Before Decision</summary>
+    <ol class="route-steps">{rows}</ol>
+    {render_model_handoff_plan(result)}
+  </details>
 </section>
 """
 
@@ -809,6 +965,90 @@ def build_operator_route_steps(result: ConsoleResult) -> list[tuple[int, str, st
             "verified" if decision_clear else "clarify",
         ),
     ]
+
+
+def build_process_chain_nodes(result: ConsoleResult) -> list[dict[str, str]]:
+    ledger = result.ledger
+    review = ledger.human_review
+    formal_missing = latest_missing_formal_obligations(ledger)
+    open_evidence = [
+        item for item in ledger.search_plan if item.required and item.status != "satisfied"
+    ]
+    has_query = bool(ledger.expressed_query or ledger.user_request)
+    spec_ready = has_query and not ledger.ambiguities and bool(ledger.goal)
+    evidence_ready = bool(result.rag_result.evidence) or not open_evidence
+    evidence_async = result.rag_result.status == "deferred" or ledger.status == "async_pending"
+    formal_ready = result.verification_passed and not formal_missing
+    review_ready = not review.required or review.status == "approved"
+    decision_ready = (
+        result.verification_passed
+        and ledger.decision_gate != "needs_more_info"
+        and review_ready
+    )
+    active_owner = current_turn_state(result).owner
+
+    nodes = [
+        {
+            "title": "1. User signal",
+            "owner": "user",
+            "owner_label": "User",
+            "detail": "Query and artifacts enter the shared spec.",
+            "state": "complete" if has_query else "current",
+        },
+        {
+            "title": "2. Shared spec",
+            "owner": "agent",
+            "owner_label": "Agent",
+            "detail": "Infer theta, goal, audience, format, and constraints.",
+            "state": "complete" if spec_ready else "blocked" if has_query else "waiting",
+        },
+        {
+            "title": "3. Evidence loop",
+            "owner": "tools",
+            "owner_label": "Tools",
+            "detail": "Retrieve, cite, or mark evidence obligations open.",
+            "state": "waiting"
+            if not has_query
+            else "async"
+            if evidence_async
+            else "complete"
+            if evidence_ready
+            else "current",
+        },
+        {
+            "title": "4. Verify",
+            "owner": "agent",
+            "owner_label": "Verifier",
+            "detail": "Block unsupported or underspecified claims.",
+            "state": "complete" if formal_ready else "blocked" if has_query else "waiting",
+        },
+        {
+            "title": "5. Human review",
+            "owner": "operator",
+            "owner_label": "Operator",
+            "detail": "Approve, request changes, or reject high-stakes packets.",
+            "state": (
+                "skipped"
+                if not review.required
+                else "complete"
+                if review.status == "approved"
+                else "blocked"
+                if review.status in {"changes_requested", "rejected"}
+                else "current"
+            ),
+        },
+        {
+            "title": "6. Decision gate",
+            "owner": "gate",
+            "owner_label": "Gate",
+            "detail": "Only clears when spec, evidence, verifier, and review agree.",
+            "state": "complete" if decision_ready else "blocked" if has_query else "waiting",
+        },
+    ]
+    for node in nodes:
+        if node["owner"] == active_owner and node["state"] not in {"complete", "skipped"}:
+            node["state"] = "current"
+    return nodes
 
 
 def render_model_handoff_plan(result: ConsoleResult) -> str:
@@ -1337,11 +1577,11 @@ def render_source_layer_panel(result: ConsoleResult) -> str:
     <summary>Source Adapters</summary>
     <ul class="source-list">{source_rows}</ul>
   </details>
-  <details open>
+  <details>
     <summary>Search Plan</summary>
     <ul class="source-list">{plan_rows}</ul>
   </details>
-  <details open>
+  <details>
     <summary>Retrieved Evidence</summary>
     <ul class="source-list">{evidence_rows}</ul>
   </details>
@@ -1494,7 +1734,7 @@ def render_human_review_panel(result: ConsoleResult) -> str:
     <dt>assignee</dt><dd>{escape(review.assigned_player)}</dd>
     <dt>owner</dt><dd>{escape(review.decision_owner)}</dd>
   </dl>
-  <details open>
+  <details>
     <summary>Reasons</summary>
     {reason_rows}
   </details>
@@ -1584,6 +1824,12 @@ def render_spend_panel(spend: object) -> str:
 
 def build_provisional_answer(result: ConsoleResult) -> list[str]:
     ledger = result.ledger
+    if not (ledger.expressed_query or ledger.user_request):
+        return [
+            "Immediate answer: waiting for a task signal.",
+            "Current handoff: the ball is on the user side.",
+            "Next action: enter a query, add artifacts if useful, then run the spec.",
+        ]
     text = (ledger.expressed_query or ledger.user_request).lower()
     answer: list[str] = []
     if result.market_math is not None and any(token in text for token in ("ho/rb", "rbob", "heating oil")):
@@ -2083,6 +2329,10 @@ h2 { font-size: 15px; line-height: 1.2; letter-spacing: 0; }
 .pill.running, .pill.info { color: var(--blue); border-color: #b8cbe2; background: #eff6ff; }
 .pill.async { color: var(--purple); border-color: #c8b8e6; background: #f7f2ff; }
 .pill.review { color: var(--teal); border-color: #9acbc6; background: #eefaf8; }
+.pill.user { color: #7a4a00; border-color: #e3c58b; background: #fff8e7; }
+.pill.agent { color: var(--blue); border-color: #b8cbe2; background: #eff6ff; }
+.pill.tools { color: var(--purple); border-color: #c8b8e6; background: #f7f2ff; }
+.pill.operator { color: var(--teal); border-color: #9acbc6; background: #eefaf8; }
 .pill.neutral { color: var(--gray); border-color: var(--line); background: #f9faf8; }
 .workspace {
   display: grid;
@@ -2091,6 +2341,7 @@ h2 { font-size: 15px; line-height: 1.2; letter-spacing: 0; }
   margin-top: 16px;
 }
 .left-rail, .center-rail, .right-rail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.advanced-rail { grid-column: 1 / -1; min-width: 0; }
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -2124,6 +2375,42 @@ button {
 button:disabled { cursor: not-allowed; opacity: 0.55; }
 form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; background: #e9f3ff; }
 .capture-state { color: var(--muted); font-size: 13px; min-height: 18px; }
+.turn-panel {
+  display: grid;
+  gap: 12px;
+  border-width: 2px;
+}
+.turn-panel.user { border-color: #e3c58b; }
+.turn-panel.agent { border-color: #b8cbe2; }
+.turn-panel.tools { border-color: #c8b8e6; }
+.turn-panel.operator { border-color: #9acbc6; }
+.turn-panel.blocked { border-color: #e2a29d; }
+.turn-panel.verified { border-color: #9ccdad; }
+.turn-heading {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+.turn-ball {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  background: #18201d;
+  color: white;
+  font-weight: 750;
+}
+.turn-owner-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.turn-detail, .next-move p { font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.next-move {
+  display: grid;
+  gap: 5px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
 .status-grid { display: grid; gap: 8px; margin-top: 12px; }
 .status-row { display: grid; grid-template-columns: 12px 70px minmax(0, 1fr); gap: 8px; align-items: start; font-size: 13px; }
 .status-row strong { display: block; font-size: 13px; line-height: 1.25; }
@@ -2142,6 +2429,48 @@ form.running button[type="submit"] { color: var(--blue); border-color: #8fb8e8; 
 .dot.yellow { background: var(--amber); }
 .dot.async { background: var(--purple); }
 .dot.review { background: var(--teal); }
+.chain-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.chain-steps li {
+  position: relative;
+  min-height: 142px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfb;
+}
+.chain-steps li + li::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 50%;
+  width: 8px;
+  border-top: 2px solid var(--line);
+}
+.chain-steps li.current { border-color: var(--blue); background: #eff6ff; box-shadow: 0 0 0 2px rgba(39, 100, 166, 0.10); }
+.chain-steps li.complete { border-color: #9ccdad; background: #eefaf3; }
+.chain-steps li.blocked { border-color: #e2a29d; background: #fff3f2; }
+.chain-steps li.async { border-color: #c8b8e6; background: #f7f2ff; }
+.chain-steps li.skipped, .chain-steps li.waiting { color: var(--muted); background: #f9faf8; }
+.chain-owner {
+  display: inline-flex;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: white;
+}
+.chain-steps strong { display: block; font-size: 13px; line-height: 1.25; }
+.chain-steps p { font-size: 12px; line-height: 1.4; margin-top: 6px; overflow-wrap: anywhere; }
 .route-steps { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .route-steps li {
   display: grid;
@@ -2281,13 +2610,32 @@ tr.frontier td { background: #f0fbf6; }
 tr.dominated td { color: var(--muted); }
 .kv { display: grid; grid-template-columns: minmax(80px, 0.7fr) minmax(0, 1fr); gap: 8px 12px; margin: 10px 0 0; }
 .kv dd { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.advanced-drawer {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px 14px;
+}
+.advanced-drawer > summary {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+.advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
 @media (max-width: 1180px) {
   .workspace { grid-template-columns: 1fr 1fr; }
   .right-rail { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .advanced-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 760px) {
   .shell { width: min(100vw - 20px, 720px); padding-top: 12px; }
-  .topbar, .workspace, .right-rail, .spec-grid, .detail-grid, .alignment-grid { display: flex; flex-direction: column; }
+  .topbar, .workspace, .right-rail, .spec-grid, .detail-grid, .alignment-grid, .chain-steps { display: flex; flex-direction: column; }
+  .chain-steps li + li::before { display: none; }
   h1 { font-size: 21px; }
 }
 """
@@ -2312,6 +2660,11 @@ const humanReviewStatusPill = document.querySelector("#humanReviewStatusPill");
 const specStatusPill = document.querySelector("#specStatusPill");
 const gateStatusPill = document.querySelector("#gateStatusPill");
 const routeGatePill = document.querySelector("#routeGatePill");
+const turnPanel = document.querySelector(".turn-panel");
+const turnOwnerPill = document.querySelector("#turnOwnerPill");
+const turnTitle = document.querySelector("#turnTitle");
+const turnDetail = document.querySelector("#turnDetail");
+const turnNext = document.querySelector("#turnNext");
 const alignmentNote = document.querySelector("#alignmentNote");
 const alignmentResult = document.querySelector("#alignmentResult");
 const alignmentConvergencePill = document.querySelector("#alignmentConvergencePill");
@@ -2383,6 +2736,17 @@ function updateGatePills(status, label) {
     pill.className = `pill ${pillClassForGate(status)}`;
     pill.textContent = pill === gateStatusPill ? `Gate: ${label}` : label;
   }
+}
+
+function setTurnState(cssClass, ownerLabel, title, detail, nextAction) {
+  if (turnPanel) turnPanel.className = `panel turn-panel ${cssClass}`;
+  if (turnOwnerPill) {
+    turnOwnerPill.className = `pill ${cssClass}`;
+    turnOwnerPill.textContent = `Ball: ${ownerLabel}`;
+  }
+  if (turnTitle) turnTitle.textContent = title;
+  if (turnDetail) turnDetail.textContent = detail;
+  if (turnNext) turnNext.textContent = nextAction;
 }
 
 function updateAlignmentPanel(payload) {
@@ -2458,6 +2822,19 @@ document.querySelectorAll("[data-review-action]").forEach(button => {
       if (payload.decision_gate) {
         updateGatePills(payload.decision_gate, payload.decision_gate_label || readableStatus(payload.decision_gate));
       }
+      if (payload.human_review?.status === "in_review" || payload.human_review?.status === "queued") {
+        setTurnState(
+          "operator",
+          "Operator",
+          "Human review packet is open",
+          "The operator is reviewing the gate packet.",
+          payload.human_review.required_actions?.[0] || "Choose an operator gate action."
+        );
+      } else if (payload.human_review?.status === "approved") {
+        setTurnState("verified", "Gate", "Operator approved the review gate", "The packet can move to the remaining decision gate checks.", "Check whether final gate conditions are now clear.");
+      } else if (payload.human_review?.status === "changes_requested" || payload.human_review?.status === "rejected") {
+        setTurnState("blocked", "User/Agent", `Review is ${readableStatus(payload.human_review.status)}`, "The shared spec needs correction, more evidence, or a revised frame.", payload.operator_message || "Resolve the operator review note.");
+      }
       if (humanReviewResult) {
         humanReviewResult.textContent = `${payload.operator_message} Gate: ${payload.decision_gate_label}.`;
       }
@@ -2495,6 +2872,11 @@ document.querySelectorAll("[data-alignment-action]").forEach(button => {
       }
       if (payload.decision_gate) {
         updateGatePills(payload.decision_gate, payload.decision_gate_label || readableStatus(payload.decision_gate));
+      }
+      if (action === "correct" || action === "request_evidence") {
+        setTurnState("user", "User", "Alignment loop changed the spec", "The current theta or evidence contract was reopened.", payload.alignment_message || "Rerun the spec after the correction is reflected.");
+      } else if (action === "endorse") {
+        setTurnState("agent", "Agent", "User endorsed the shared spec", "The agent can continue through evidence, verification, and gate checks.", payload.alignment_message || "Continue the route.");
       }
       if (alignmentResult) alignmentResult.textContent = payload.alignment_message || "alignment move recorded";
     } catch (error) {
