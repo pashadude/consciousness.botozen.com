@@ -49,7 +49,11 @@ EXCLUDED_SPANNER_TAGS = {
     "trader_agent",
     "user_talk",
 }
-RELEVANCE_STOP_TERMS = {
+GENERIC_RELEVANCE_STOP_TERMS = {
+    "a",
+    "about",
+    "an",
+    "and",
     "benchmark",
     "cargo",
     "commodity",
@@ -57,69 +61,40 @@ RELEVANCE_STOP_TERMS = {
     "counterparty",
     "documents",
     "export",
+    "for",
     "freight",
+    "from",
+    "give",
     "inspection",
+    "into",
     "logistics",
+    "look",
     "market",
     "offer",
     "payment",
+    "please",
     "price",
     "risk",
+    "show",
     "shipping",
     "should",
     "terms",
+    "that",
+    "this",
     "tonnes",
     "tons",
     "trade",
     "trader",
     "verify",
     "verification",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "with",
+    "why",
 }
-HIGH_VALUE_RELEVANCE_TERMS = {
-    "arb",
-    "arbitrage",
-    "aluminum",
-    "aluminium",
-    "ammonia",
-    "basra",
-    "brent",
-    "brent wti",
-    "calendar spread",
-    "carry",
-    "cfr",
-    "copper",
-    "crack",
-    "crack spread",
-    "dap",
-    "diesel",
-    "ercot",
-    "fertilizer",
-    "fob",
-    "freight",
-    "gasoline",
-    "heating oil",
-    "iraq",
-    "jkm",
-    "lng",
-    "map",
-    "nickel",
-    "pjm",
-    "potash",
-    "rbob",
-    "spread",
-    "term structure",
-    "sugar",
-    "sulfur",
-    "sulphur",
-    "ttf",
-    "ulsd",
-    "urea",
-    "umm qasr",
-    "wti",
-    "wti brent",
-}
-
-
 @dataclass(frozen=True)
 class SearchEvidence:
     evidence_id: str
@@ -131,6 +106,7 @@ class SearchEvidence:
     confidence: str = "medium"
     relevance_score: float = 0.0
     relevance_reasons: tuple[str, ...] = ()
+    provider_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +121,20 @@ class TraderRagResult:
     @property
     def has_live_evidence(self) -> bool:
         return bool(self.evidence)
+
+
+@dataclass(frozen=True)
+class QueryRelevanceProfile:
+    """Query-derived lexical guard used after Spanner/provider ranking.
+
+    The source provider should do the heavy retrieval work. This profile only
+    blocks obvious mismatches by extracting material anchors from the query
+    itself, instead of relying on a fixed commodity vocabulary.
+    """
+
+    query: str
+    terms: tuple[str, ...]
+    material_terms: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -729,63 +719,123 @@ def search_evidence_matches_query(
 
 
 def evidence_relevance(item: SearchEvidence, query: str) -> tuple[float, list[str]]:
-    terms = evidence_relevance_terms(query)
-    if not terms:
+    profile = build_query_relevance_profile(query)
+    if not profile.terms:
         return 0.0, []
     haystack = normalize_relevance_text(f"{item.title} {item.summary}")
     title_haystack = normalize_relevance_text(item.title)
     matched: list[str] = []
     score = 0.0
-    for term in terms:
+    for term in profile.terms:
         normalized_term = normalize_relevance_text(term)
         if not normalized_term or normalized_term not in haystack:
             continue
         matched.append(term)
-        weight = evidence_term_weight(term)
+        weight = evidence_term_weight(term, profile=profile)
         if normalized_term in title_haystack:
             weight += 0.25
         score += weight
     if not matched:
         return 0.0, []
-    material_terms = [term for term in terms if evidence_term_weight(term) >= 1.5]
-    if material_terms and not any(term in matched for term in material_terms):
+    if profile.material_terms and not any(term in matched for term in profile.material_terms):
         return 0.0, matched
+    if item.provider_score is not None:
+        score += bounded_provider_score(item.provider_score)
     return score, matched
 
 
 def evidence_relevance_terms(query: str) -> list[str]:
-    lower_query = query.lower()
-    phrases = re.findall(r'"([^"]{2,80})"', lower_query)
-    tokens = re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{1,}", lower_query)
+    return list(build_query_relevance_profile(query).terms)
+
+
+def build_query_relevance_profile(query: str) -> QueryRelevanceProfile:
+    phrases = re.findall(r'"([^"]{2,80})"', query)
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_/-]{1,}", query)
     terms: list[str] = []
-    if "ho/rb" in lower_query or "ho rb" in lower_query:
-        terms.extend(["heating oil", "rbob", "spread"])
-    for value in [*phrases, *tokens]:
+    material: list[str] = []
+
+    for value in phrases:
         normalized = " ".join(value.split()).strip(" .,:;")
         normalized = normalize_relevance_text(normalized)
-        if normalized == "ho":
-            normalized = "heating oil"
-        elif normalized == "rb":
-            normalized = "rbob"
-        if (
-            not normalized
-            or normalized in RELEVANCE_STOP_TERMS
-            or normalized in {"and", "the", "for", "with"}
-            or (len(normalized) < 4 and normalized not in HIGH_VALUE_RELEVANCE_TERMS)
-        ):
+        if not normalized or normalized in GENERIC_RELEVANCE_STOP_TERMS:
             continue
-        if normalized not in terms:
-            terms.append(normalized)
-    return terms
+        add_relevance_term(terms, material, normalized, is_material=True)
+
+    for raw in raw_tokens:
+        normalized = normalize_relevance_text(raw)
+        if not relevance_token_is_usable(normalized):
+            continue
+        is_material = query_token_is_material(raw)
+        add_relevance_term(terms, material, normalized, is_material=is_material)
+
+    if not material:
+        for value in terms[:2]:
+            add_relevance_term(terms, material, value, is_material=True)
+
+    return QueryRelevanceProfile(
+        query=query,
+        terms=tuple(terms),
+        material_terms=tuple(material),
+    )
 
 
-def evidence_term_weight(term: str) -> float:
+def add_relevance_term(
+    terms: list[str],
+    material: list[str],
+    value: str,
+    *,
+    is_material: bool,
+) -> None:
+    if value not in terms:
+        terms.append(value)
+    if is_material and value not in material:
+        material.append(value)
+
+
+def relevance_token_is_usable(value: str) -> bool:
+    if not value:
+        return False
+    if value in GENERIC_RELEVANCE_STOP_TERMS:
+        return False
+    if len(value) < 3 and not any(character.isdigit() for character in value):
+        return False
+    return True
+
+
+def query_token_is_material(raw: str) -> bool:
+    stripped = raw.strip()
+    if not stripped:
+        return False
+    if "/" in stripped:
+        return True
+    if any(character.isdigit() for character in stripped):
+        return True
+    alpha = re.sub(r"[^A-Za-z]", "", stripped)
+    if len(alpha) >= 2 and alpha.isupper():
+        return True
+    normalized = normalize_relevance_text(stripped)
+    return len(normalized) >= 6 and normalized not in GENERIC_RELEVANCE_STOP_TERMS
+
+
+def evidence_term_weight(term: str, *, profile: QueryRelevanceProfile | None = None) -> float:
     normalized = normalize_relevance_text(term)
-    if normalized in HIGH_VALUE_RELEVANCE_TERMS:
+    if profile and normalized in profile.material_terms:
         return 2.0
     if " " in normalized:
         return 2.0
+    if any(character.isdigit() for character in normalized):
+        return 1.5
     return 1.0
+
+
+def bounded_provider_score(value: float) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if score <= 0:
+        return 0.0
+    return min(score, 1.0)
 
 
 def normalize_relevance_text(value: str) -> str:
@@ -1162,7 +1212,7 @@ def spanner_rows_to_evidence(
 
 def spanner_row_is_self_memory(row: Any) -> bool:
     try:
-        _chunk_id, _doc_id, source_dataset, _chunk_text, _published_at, source, _commodities, tags = row
+        _chunk_id, _doc_id, source_dataset, _chunk_text, _published_at, source, _commodities, tags, _provider_score = unpack_spanner_row(row)
     except (TypeError, ValueError):
         return False
     source_value = str(source or "").strip().lower()
@@ -1224,9 +1274,19 @@ def execute_spanner_semantic_search(
     param_types: Any,
 ) -> list[Any]:
     sql = f"""
-        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
+        SELECT
+          ChunkId,
+          DocId,
+          SourceDataset,
+          ChunkText,
+          PublishedAt,
+          Source,
+          Commodities,
+          Tags,
+          SCORE(ChunkTokens, @query) AS RetrievalScore
         FROM {table}
         WHERE SEARCH(ChunkTokens, @query)
+        ORDER BY RetrievalScore DESC
         LIMIT @limit
     """
     with database.snapshot() as snapshot:
@@ -1264,15 +1324,37 @@ def execute_spanner_vector_search(
               )
             )) AS value
           ) AS embedding
+        ),
+        ranked AS (
+          SELECT
+            ChunkId,
+            DocId,
+            SourceDataset,
+            ChunkText,
+            PublishedAt,
+            Source,
+            Commodities,
+            Tags,
+            APPROX_COSINE_DISTANCE(
+              query_embedding.embedding,
+              Embedding,
+              OPTIONS => JSON '{{"num_leaves_to_search": 50}}'
+            ) AS Distance
+          FROM {table}, query_embedding
+          WHERE Embedding IS NOT NULL
         )
-        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
-        FROM {table}, query_embedding
-        WHERE Embedding IS NOT NULL
-        ORDER BY APPROX_COSINE_DISTANCE(
-          query_embedding.embedding,
-          Embedding,
-          OPTIONS => JSON '{{"num_leaves_to_search": 50}}'
-        )
+        SELECT
+          ChunkId,
+          DocId,
+          SourceDataset,
+          ChunkText,
+          PublishedAt,
+          Source,
+          Commodities,
+          Tags,
+          1.0 - Distance AS RetrievalScore
+        FROM ranked
+        ORDER BY Distance
         LIMIT @limit
     """
     with database.snapshot() as snapshot:
@@ -1345,7 +1427,16 @@ def execute_spanner_hybrid_search(
           )
           GROUP BY DocId, ChunkId
         )
-        SELECT c.ChunkId, c.DocId, c.SourceDataset, c.ChunkText, c.PublishedAt, c.Source, c.Commodities, c.Tags
+        SELECT
+          c.ChunkId,
+          c.DocId,
+          c.SourceDataset,
+          c.ChunkText,
+          c.PublishedAt,
+          c.Source,
+          c.Commodities,
+          c.Tags,
+          f.rrf_score AS RetrievalScore
         FROM fused AS f
         JOIN {table} AS c
           ON c.DocId = f.DocId
@@ -1384,7 +1475,7 @@ def execute_spanner_scan_fallback(
         return []
     where = " AND ".join(f"LOWER(TextForEmbedding) LIKE @term{index}" for index, _ in enumerate(terms))
     sql = f"""
-        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags
+        SELECT ChunkId, DocId, SourceDataset, ChunkText, PublishedAt, Source, Commodities, Tags, NULL AS RetrievalScore
         FROM {table}
         WHERE {where}
         LIMIT @limit
@@ -1436,7 +1527,7 @@ def spanner_row_to_evidence(
     query: str,
     config: TraderSourceConfig,
 ) -> SearchEvidence:
-    chunk_id, doc_id, source_dataset, chunk_text, published_at, source, commodities, tags = row
+    chunk_id, doc_id, source_dataset, chunk_text, published_at, source, commodities, tags, provider_score = unpack_spanner_row(row)
     text = str(chunk_text or "")
     title = extract_spanner_title(text, source_dataset=str(source_dataset or "spanner_rag"))
     uri = (
@@ -1464,7 +1555,22 @@ def spanner_row_to_evidence(
         query=query,
         source="spanner_rag",
         confidence="medium",
+        provider_score=provider_score,
     )
+
+
+def unpack_spanner_row(row: Any) -> tuple[Any, Any, Any, Any, Any, Any, Any, Any, float | None]:
+    values = list(row)
+    if len(values) == 8:
+        return (*values, None)  # type: ignore[return-value]
+    if len(values) >= 9:
+        provider_score = values[8]
+        try:
+            score = None if provider_score is None else float(provider_score)
+        except (TypeError, ValueError):
+            score = None
+        return (*values[:8], score)  # type: ignore[return-value]
+    raise ValueError(f"Unexpected Spanner RAG row shape: {len(values)} column(s)")
 
 
 def extract_spanner_title(text: str, *, source_dataset: str) -> str:
@@ -1668,26 +1774,6 @@ def normalize_evidence_dedupe_key(value: str) -> str:
     lowered = lowered.removeprefix("https://")
     lowered = lowered.removeprefix("http://")
     return lowered.rstrip("/")
-
-
-def extract_search_terms(lower: str) -> list[str]:
-    candidates = (
-        "brent",
-        "wti",
-        "rbob",
-        "ulsd",
-        "sulfur",
-        "sulphur",
-        "iraq",
-        "umm qasr",
-        "fob",
-        "cfr",
-        "cargo",
-        "freight",
-        "counterparty",
-        "sanctions",
-    )
-    return [term for term in candidates if term in lower]
 
 
 def source_type_for_provider(provider: str) -> str:

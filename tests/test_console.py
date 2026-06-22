@@ -286,8 +286,8 @@ def test_console_sulfur_offer_builds_trader_game_frame(tmp_path, monkeypatch) ->
     assert "Formal Proof Checks" in response.text
     assert "&quot;sulfur&quot; &quot;Umm Qasr&quot; FOB price" in response.text
     assert "Provisional Decision Frame" in response.text
-    assert "not go-ready" in response.text
-    assert "no live cited market/search evidence" in response.text
+    assert "not execution-ready yet" in response.text
+    assert "no cited evidence was retrieved for this run" in response.text
     assert 'li class="blocked"' in response.text
     assert "needs_more_info" in response.text
     assert "audience</span><p>traders" in response.text
@@ -333,7 +333,8 @@ def test_console_sulfur_offer_renders_fixture_source_evidence(tmp_path, monkeypa
     assert "Trader Source Layer" in response.text
     assert "Sulfur FOB benchmark" in response.text
     assert "https://example.test/sulfur-fob" in response.text
-    assert "retrieved search evidence is attached" in response.text
+    assert "retrieved with 1 cited item" in response.text
+    assert "use retrieved evidence below before trusting material claims" in response.text
 
 
 def test_console_predeal_sulfur_negotiation_returns_negotiation_brief(
@@ -363,8 +364,8 @@ def test_console_predeal_sulfur_negotiation_returns_negotiation_brief(
     assert all(not item["required"] for item in payload["ledger"]["search_plan"])
     assert any("Nitron" in item["query"] for item in payload["ledger"]["search_plan"])
     assert not any("Umm Qasr" in item["query"] for item in payload["ledger"]["search_plan"])
-    assert any("negotiation-ready, not deal-ready" in item for item in payload["provisional_answer"])
-    assert any("no cargo is executable yet" in item for item in payload["provisional_answer"])
+    assert any("working answer" in item.lower() for item in payload["provisional_answer"])
+    assert any("official negotiations" in item for item in payload["provisional_answer"])
 
 
 def test_console_operator_can_submit_human_review(tmp_path, monkeypatch) -> None:

@@ -7,6 +7,7 @@ from app.trader_rag import (
     TraderRagResult,
     TraderSourceConfig,
     apply_rag_to_ledger,
+    build_query_relevance_profile,
     dedupe_evidence,
     default_opoint_mcp_command,
     evidence_relevance,
@@ -390,7 +391,53 @@ def test_relevance_accepts_strategy_language_for_ho_rb_arb() -> None:
     score, reasons = evidence_relevance(strategy, query)
 
     assert score >= 4.0
-    assert {"heating oil", "rbob", "arb", "spread"}.issubset(set(reasons))
+    assert {"ho rb", "arb", "spread"}.issubset(set(reasons))
+
+
+def test_query_relevance_profile_is_derived_from_query_not_static_vocab() -> None:
+    profile = build_query_relevance_profile(
+        '"Kazakh sulphur" "Pavlodar" official negotiations'
+    )
+
+    assert {"kazakh sulfur", "pavlodar"}.issubset(set(profile.material_terms))
+    assert "umm qasr" not in profile.terms
+    assert "rbob" not in profile.terms
+
+
+def test_spanner_row_relevance_preserves_provider_score() -> None:
+    config = TraderSourceConfig(
+        provider="spanner_rag",
+        google_agent_search_enabled=False,
+        max_queries=3,
+        max_results=5,
+        timeout_seconds=6,
+        google_cloud_project="zenpulsar",
+        spanner_instance_id="commodity-rag",
+        spanner_database_id="trader_rag",
+        spanner_chunks_table="RagChunks",
+    )
+    row = (
+        "nickel-chunk",
+        "nickel-doc",
+        "commodity_articles",
+        "Title: Nickel inventory squeeze\nExchange stocks tightened and spreads rallied.",
+        "2026-06-10T00:00:00Z",
+        "commodity_news",
+        ["nickel"],
+        ["inventory", "spread"],
+        0.42,
+    )
+
+    evidence = spanner_rows_to_evidence(
+        [row],
+        query='"nickel" inventory squeeze',
+        config=config,
+        limit=5,
+    )
+
+    assert len(evidence) == 1
+    assert evidence[0].provider_score == 0.42
+    assert evidence[0].relevance_score >= 2.0
 
 
 def test_spanner_rag_provider_retrieves_private_corpus(monkeypatch) -> None:
